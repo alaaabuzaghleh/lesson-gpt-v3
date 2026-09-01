@@ -3,6 +3,7 @@ import { Search } from 'lucide-react'
 import { api } from '../api/client'
 import type { SearchHit } from '../types/api'
 import { ErrorBanner, JsonViewer } from '../components/ui'
+import { t } from '../i18n/ar'
 
 export function SearchPage() {
   const [query, setQuery] = useState('')
@@ -25,7 +26,7 @@ export function SearchPage() {
       const res = await api.search({ query: query.trim(), filters, size })
       setResults(res.items)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Search failed — is OpenSearch running?')
+      setError(err instanceof Error ? err.message : t.search.failed)
       setResults([])
     } finally {
       setLoading(false)
@@ -36,8 +37,8 @@ export function SearchPage() {
     <div className="page">
       <header className="page-header">
         <div>
-          <h1>Search indexed content</h1>
-          <p>Query OpenSearch for extracted textbook records</p>
+          <h1>{t.search.title}</h1>
+          <p>{t.search.subtitle}</p>
         </div>
       </header>
 
@@ -49,7 +50,7 @@ export function SearchPage() {
             <Search size={20} />
             <input
               type="text"
-              placeholder="Search query (Arabic or English)…"
+              placeholder={t.search.placeholder}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               dir="auto"
@@ -57,36 +58,37 @@ export function SearchPage() {
           </div>
           <div className="form-row-inline">
             <label>
-              Book ID filter
+              {t.search.bookIdFilter}
               <input
                 type="text"
-                placeholder="Optional book_id"
+                placeholder={t.search.bookIdPlaceholder}
                 value={bookId}
                 onChange={(e) => setBookId(e.target.value)}
+                dir="ltr"
               />
             </label>
             <label>
-              Results
+              {t.search.resultsCount}
               <input type="number" min={1} max={100} value={size} onChange={(e) => setSize(+e.target.value)} />
             </label>
           </div>
           <button type="submit" className="btn btn-primary" disabled={loading || !query.trim()}>
-            {loading ? 'Searching…' : 'Search'}
+            {loading ? t.search.searching : t.search.search}
           </button>
         </form>
       </section>
 
       {searched && (
         <section className="card">
-          <h2>Results ({results.length})</h2>
+          <h2>{t.search.results} ({results.length})</h2>
           {results.length === 0 ? (
-            <p className="muted">No matches found.</p>
+            <p className="muted">{t.search.noMatches}</p>
           ) : (
             <div className="results-list">
               {results.map((hit, i) => (
                 <details key={i} className="result-item" open={results.length <= 3}>
                   <summary>
-                    {String(hit.title ?? hit.lesson_title ?? hit.page ?? `Result ${i + 1}`)}
+                    {String(hit.title ?? hit.lesson_title ?? hit.page ?? `${t.common.result} ${i + 1}`)}
                   </summary>
                   <JsonViewer data={hit} />
                 </details>

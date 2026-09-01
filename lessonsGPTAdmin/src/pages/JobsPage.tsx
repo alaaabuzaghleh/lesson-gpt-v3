@@ -10,6 +10,7 @@ import {
   StatusBadge,
   formatDate,
 } from '../components/ui'
+import { stageLabel, statusLabel, t } from '../i18n/ar'
 
 const STATUSES: (JobStatus | 'all')[] = [
   'all', 'queued', 'running', 'completed', 'failed', 'cancelled',
@@ -30,7 +31,7 @@ export function JobsPage() {
       setJobs(res.items)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load jobs')
+      setError(e instanceof Error ? e.message : t.jobs.loadError)
     } finally {
       setLoading(false)
     }
@@ -39,16 +40,16 @@ export function JobsPage() {
   useEffect(() => {
     setLoading(true)
     load()
-    const t = setInterval(load, 5000)
-    return () => clearInterval(t)
+    const timer = setInterval(load, 5000)
+    return () => clearInterval(timer)
   }, [load])
 
   return (
     <div className="page">
       <header className="page-header">
         <div>
-          <h1>Extraction jobs</h1>
-          <p>Track pipeline progress, cancel, or retry failed runs</p>
+          <h1>{t.jobs.title}</h1>
+          <p>{t.jobs.subtitle}</p>
         </div>
       </header>
 
@@ -62,7 +63,7 @@ export function JobsPage() {
             className={`filter-chip${filter === s ? ' active' : ''}`}
             onClick={() => setFilter(s)}
           >
-            {s}
+            {s === 'all' ? t.common.all : statusLabel(s)}
           </button>
         ))}
       </div>
@@ -71,43 +72,43 @@ export function JobsPage() {
         {loading && jobs.length === 0 ? (
           <LoadingSpinner />
         ) : jobs.length === 0 ? (
-          <EmptyState message="No jobs match this filter." />
+          <EmptyState message={t.jobs.noMatch} />
         ) : (
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Job</th>
-                  <th>Book</th>
-                  <th>Status</th>
-                  <th>Stage</th>
-                  <th>Progress</th>
-                  <th>Page</th>
-                  <th>Updated</th>
+                  <th>{t.jobs.job}</th>
+                  <th>{t.jobs.book}</th>
+                  <th>{t.jobs.status}</th>
+                  <th>{t.jobs.stage}</th>
+                  <th>{t.jobs.progress}</th>
+                  <th>{t.jobs.page}</th>
+                  <th>{t.jobs.updated}</th>
                 </tr>
               </thead>
               <tbody>
                 {jobs.map((job) => (
                   <tr key={job.job_id}>
                     <td>
-                      <Link to={`/jobs/${job.job_id}`} className="link-mono">
+                      <Link to={`/jobs/${job.job_id}`} className="link-mono" dir="ltr">
                         {job.job_id.slice(0, 12)}…
                       </Link>
                     </td>
                     <td>
-                      <Link to={`/books/${job.book_resource_id}`} className="muted">
+                      <Link to={`/books/${job.book_resource_id}`} className="muted" dir="ltr">
                         {job.book_resource_id.slice(0, 10)}…
                       </Link>
                     </td>
                     <td><StatusBadge status={job.status} /></td>
-                    <td>{job.stage ?? '—'}</td>
+                    <td>{stageLabel(job.stage)}</td>
                     <td style={{ minWidth: 140 }}>
                       <ProgressBar value={job.progress} />
                     </td>
                     <td className="muted">
                       {job.current_page != null && job.total_pages != null
                         ? `${job.current_page} / ${job.total_pages}`
-                        : '—'}
+                        : t.common.dash}
                     </td>
                     <td className="muted">{formatDate(job.updated_at)}</td>
                   </tr>

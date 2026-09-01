@@ -10,6 +10,7 @@ import {
   formatBytes,
   formatDate,
 } from '../components/ui'
+import { t } from '../i18n/ar'
 
 export function BooksPage() {
   const [books, setBooks] = useState<Book[]>([])
@@ -18,11 +19,7 @@ export function BooksPage() {
   const [uploading, setUploading] = useState(false)
   const [file, setFile] = useState<File | null>(null)
   const [metaJson, setMetaJson] = useState(
-    JSON.stringify(
-      { country: 'Jordan', grade: 'Grade 8', subject: 'Science', language: 'ar' },
-      null,
-      2,
-    ),
+    JSON.stringify(t.books.defaultMeta, null, 2),
   )
 
   const load = useCallback(async () => {
@@ -31,7 +28,7 @@ export function BooksPage() {
       setBooks(res.items)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load books')
+      setError(e instanceof Error ? e.message : t.books.loadError)
     } finally {
       setLoading(false)
     }
@@ -47,9 +44,9 @@ export function BooksPage() {
     let metadata: Record<string, unknown> = {}
     try {
       metadata = JSON.parse(metaJson)
-      if (typeof metadata !== 'object' || metadata === null) throw new Error('Must be object')
+      if (typeof metadata !== 'object' || metadata === null) throw new Error('invalid')
     } catch {
-      setError('Metadata must be valid JSON object')
+      setError(t.books.metadataInvalid)
       return
     }
     setUploading(true)
@@ -59,7 +56,7 @@ export function BooksPage() {
       setFile(null)
       await load()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Upload failed')
+      setError(err instanceof Error ? err.message : t.books.uploadFailed)
     } finally {
       setUploading(false)
     }
@@ -69,15 +66,15 @@ export function BooksPage() {
     <div className="page">
       <header className="page-header">
         <div>
-          <h1>Books</h1>
-          <p>Upload PDF textbooks and manage metadata</p>
+          <h1>{t.books.title}</h1>
+          <p>{t.books.subtitle}</p>
         </div>
       </header>
 
       {error && <ErrorBanner message={error} />}
 
       <section className="card upload-card">
-        <h2><Upload size={20} /> Upload textbook</h2>
+        <h2><Upload size={20} /> {t.books.uploadTitle}</h2>
         <form onSubmit={handleUpload} className="upload-form">
           <div className="form-row">
             <label className="file-drop">
@@ -86,39 +83,40 @@ export function BooksPage() {
                 accept="application/pdf,.pdf"
                 onChange={(e) => setFile(e.target.files?.[0] ?? null)}
               />
-              {file ? file.name : 'Choose PDF file…'}
+              {file ? file.name : t.books.choosePdf}
             </label>
           </div>
           <div className="form-row">
-            <label>Metadata (JSON)</label>
+            <label>{t.books.metadata}</label>
             <textarea
               value={metaJson}
               onChange={(e) => setMetaJson(e.target.value)}
               rows={6}
               spellCheck={false}
+              dir="ltr"
             />
           </div>
           <button type="submit" className="btn btn-primary" disabled={!file || uploading}>
-            {uploading ? 'Uploading…' : 'Upload book'}
+            {uploading ? t.books.uploading : t.books.uploadBook}
           </button>
         </form>
       </section>
 
       <section className="card">
-        <h2>Registered books ({books.length})</h2>
+        <h2>{t.books.registered} ({books.length})</h2>
         {loading ? (
           <LoadingSpinner />
         ) : books.length === 0 ? (
-          <EmptyState message="No books yet. Upload a PDF to get started." />
+          <EmptyState message={t.books.noBooks} />
         ) : (
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Filename</th>
-                  <th>Subject / Grade</th>
-                  <th>Size</th>
-                  <th>Uploaded</th>
+                  <th>{t.books.filename}</th>
+                  <th>{t.books.subjectGrade}</th>
+                  <th>{t.books.size}</th>
+                  <th>{t.books.uploaded}</th>
                   <th></th>
                 </tr>
               </thead>
@@ -127,16 +125,16 @@ export function BooksPage() {
                   <tr key={book.resource_id}>
                     <td>
                       <strong>{book.filename}</strong>
-                      <div className="mono muted">{book.resource_id.slice(0, 16)}…</div>
+                      <div className="mono muted" dir="ltr">{book.resource_id.slice(0, 16)}…</div>
                     </td>
                     <td>
-                      {String(book.metadata.subject ?? '—')} · {String(book.metadata.grade ?? '—')}
+                      {String(book.metadata.subject ?? t.common.dash)} · {String(book.metadata.grade ?? t.common.dash)}
                     </td>
                     <td>{formatBytes(book.size_bytes)}</td>
                     <td className="muted">{formatDate(book.created_at)}</td>
                     <td>
                       <Link to={`/books/${book.resource_id}`} className="btn btn-sm">
-                        Open
+                        {t.common.open}
                       </Link>
                     </td>
                   </tr>

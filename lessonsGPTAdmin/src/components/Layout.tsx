@@ -6,12 +6,13 @@ import {
   Search,
   GraduationCap,
 } from 'lucide-react'
+import { t } from '../i18n/ar'
 
 const NAV = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
-  { to: '/books', label: 'Books', icon: BookOpen },
-  { to: '/jobs', label: 'Jobs', icon: Briefcase },
-  { to: '/search', label: 'Search', icon: Search },
+  { to: '/', label: t.nav.dashboard, icon: LayoutDashboard, end: true },
+  { to: '/books', label: t.nav.books, icon: BookOpen },
+  { to: '/jobs', label: t.nav.jobs, icon: Briefcase },
+  { to: '/search', label: t.nav.search, icon: Search },
 ]
 
 export function Layout() {
@@ -21,8 +22,8 @@ export function Layout() {
         <div className="brand">
           <GraduationCap size={28} strokeWidth={2.2} />
           <div>
-            <strong>LessonsGPT</strong>
-            <span>Admin</span>
+            <strong>{t.brand.title}</strong>
+            <span>{t.brand.subtitle}</span>
           </div>
         </div>
         <nav className="nav">
@@ -39,7 +40,7 @@ export function Layout() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <span>Textbook Ingestor v4</span>
+          <span>{t.brand.footer}</span>
         </div>
       </aside>
       <main className="main">
