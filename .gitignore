@@ -42,3 +42,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Node / React admin dashboard
+lessonsGPTAdmin/node_modules/
+lessonsGPTAdmin/dist/
+lessonsGPTAdmin/.env
+lessonsGPTAdmin/.env.local
