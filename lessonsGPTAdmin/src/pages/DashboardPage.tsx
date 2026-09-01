@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Activity, BookOpen, CheckCircle2, Search as SearchIcon } from 'lucide-react'
+import { Activity, BookOpen, CheckCircle2, Search as SearchIcon, Briefcase, XCircle, Loader2 } from 'lucide-react'
 import { api } from '../api/client'
 import type { ExtractionJob, HealthResponse } from '../types/api'
 import {
@@ -74,15 +74,31 @@ export function DashboardPage() {
       {error && <ErrorBanner message={error} />}
 
       <div className="stat-grid">
-        <StatCard title={t.dashboard.booksUploaded} value={bookCount} accent="#6366f1" />
+        <StatCard
+          title={t.dashboard.booksUploaded}
+          value={bookCount}
+          accent="#4f46e5"
+          icon={<BookOpen size={20} />}
+        />
         <StatCard
           title={t.dashboard.activeJobs}
           value={running}
           subtitle={`${jobs.length} ${t.dashboard.total}`}
-          accent="#0ea5e9"
+          accent="#0284c7"
+          icon={<Loader2 size={20} />}
         />
-        <StatCard title={t.dashboard.completed} value={completed} accent="#22c55e" />
-        <StatCard title={t.dashboard.failed} value={failed} accent="#ef4444" />
+        <StatCard
+          title={t.dashboard.completed}
+          value={completed}
+          accent="#059669"
+          icon={<CheckCircle2 size={20} />}
+        />
+        <StatCard
+          title={t.dashboard.failed}
+          value={failed}
+          accent="#dc2626"
+          icon={<XCircle size={20} />}
+        />
       </div>
 
       {health && (
@@ -145,7 +161,7 @@ export function DashboardPage() {
             {t.dashboard.uploadTextbook}
           </Link>
           <Link to="/jobs" className="quick-link">
-            <CheckCircle2 size={20} />
+            <Briefcase size={20} />
             {t.dashboard.manageJobs}
           </Link>
           <Link to="/search" className="quick-link">

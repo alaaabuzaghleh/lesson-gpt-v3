@@ -1,8 +1,13 @@
+import os
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from book_ingestor.api.job_store import JobStore
 from book_ingestor.api import worker as worker_module
+from book_ingestor.config import settings
 
 
 class FakeMetadata:
@@ -39,14 +44,30 @@ class FakePipeline:
         return FakeMetadata(), "book-semantic-id", [FakeDoc("question"), FakeDoc("figure", "asset-1")]
 
 
-def test_worker_completes_persisted_background_job(tmp_path, monkeypatch):
-    store = JobStore(tmp_path / "jobs.sqlite3")
+@pytest.fixture
+def pg_store():
+    url = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", settings.database_url))
+    try:
+        store = JobStore(url)
+    except Exception as exc:
+        pytest.skip(f"PostgreSQL not available: {exc}")
+    with store.pool.connection() as conn:
+        conn.execute("TRUNCATE job_events, jobs, books RESTART IDENTITY CASCADE")
+        conn.commit()
+    yield store
+    store.close()
+
+
+def test_worker_completes_persisted_background_job(tmp_path, monkeypatch, pg_store):
+    store = pg_store
     pdf = tmp_path / "book.pdf"
     pdf.write_bytes(b"%PDF-1.4\n%%EOF")
-    store.create_book("b1", "book.pdf", str(pdf), pdf.stat().st_size, "hash", {"country": "Jordan"})
+    resource_id = f"b-{uuid.uuid4().hex[:12]}"
+    store.create_book(resource_id, "book.pdf", str(pdf), pdf.stat().st_size, "hash", {"country": "Jordan"})
+    job_id = f"j-{uuid.uuid4().hex[:12]}"
     store.create_job(
-        job_id="j1",
-        book_resource_id="b1",
+        job_id=job_id,
+        book_resource_id=resource_id,
         output_dir=str(tmp_path / "out"),
         start_page=1,
         end_page=None,
@@ -56,10 +77,12 @@ def test_worker_completes_persisted_background_job(tmp_path, monkeypatch):
         metadata_overrides={},
     )
     job = store.claim_next_job()
+    assert job is not None
+    assert job["job_id"] == job_id
     monkeypatch.setattr(worker_module, "BookIngestionPipeline", FakePipeline)
     pool = worker_module.ExtractionWorkerPool(store, worker_count=1)
     pool._run_job(job)
-    done = store.get_job("j1")
+    done = store.get_job(job_id)
     assert done["status"] == "completed"
     assert done["progress"] == 100
     assert done["book_id"] == "book-semantic-id"

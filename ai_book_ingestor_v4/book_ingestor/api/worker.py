@@ -61,6 +61,19 @@ class ExtractionWorkerPool:
             pipeline = BookIngestionPipeline(book["stored_path"], job["output_dir"])
             base_meta = dict(book.get("metadata") or {})
             base_meta.update(job.get("metadata_overrides") or {})
+            if book.get("subject_id"):
+                path = self.store.get_subject_path(book["subject_id"])
+                if path:
+                    base_meta.update({
+                        "country": path.get("country_name"),
+                        "country_id": path.get("country_id"),
+                        "education_system": path.get("education_system_name"),
+                        "education_system_id": path.get("education_system_id"),
+                        "grade": path.get("grade_name"),
+                        "grade_id": path.get("grade_id"),
+                        "subject": path.get("subject_name"),
+                        "subject_id": path.get("subject_id"),
+                    })
 
             def progress(event: dict[str, Any]) -> None:
                 self.store.update_progress(

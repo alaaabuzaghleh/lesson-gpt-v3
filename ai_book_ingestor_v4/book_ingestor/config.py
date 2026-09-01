@@ -33,11 +33,17 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     api_data_root: str = "./data"
-    api_job_db: str = "./data/jobs.sqlite3"
     api_worker_count: int = 2
     api_worker_poll_seconds: float = 0.5
     api_max_upload_mb: int = 1024
     api_cors_origins: str = "*"
+
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/lessons_gpt"
+    jwt_secret: str = "change-me-in-production-use-long-random-string"
+    jwt_expire_minutes: int = 480
+    super_admin_email: str = "superadmin@lessonsgpt.com"
+    super_admin_password: str = "SuperAdmin123!"
+    super_admin_name: str = "Super Admin"
 
 
 settings = Settings()

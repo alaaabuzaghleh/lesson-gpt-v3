@@ -1,8 +1,44 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, model_validator
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6)
+
+
+class CreateAdminRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8)
+    full_name: str = Field(min_length=1, max_length=200)
+
+
+class CreateCountryRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    name_ar: str | None = None
+    code: str | None = Field(default=None, max_length=10)
+
+
+class CreateEducationSystemRequest(BaseModel):
+    country_id: str
+    name: str = Field(min_length=1, max_length=200)
+    name_ar: str | None = None
+
+
+class CreateGradeRequest(BaseModel):
+    education_system_id: str
+    name: str = Field(min_length=1, max_length=200)
+    name_ar: str | None = None
+    sort_order: int = 0
+
+
+class CreateSubjectRequest(BaseModel):
+    grade_id: str
+    name: str = Field(min_length=1, max_length=200)
+    name_ar: str | None = None
 
 
 class ExtractionJobRequest(BaseModel):
@@ -38,3 +74,6 @@ class QuestionSearchRequest(BaseModel):
     unit_title: str | None = None
     requires_visual: bool | None = None
     size: int = Field(default=100, ge=1, le=500)
+
+
+UserRole = Literal["super_admin", "admin", "student"]

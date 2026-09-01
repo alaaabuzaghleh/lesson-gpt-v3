@@ -8,7 +8,7 @@ It is intentionally **not built around a fixed subject taxonomy**. The same pipe
 
 The extraction pipeline can now run as a long-lived REST service. Uploading a textbook and extracting it are separate resources: the PDF is registered once, then one or more extraction jobs can be created for it.
 
-Jobs are **not** implemented with FastAPI's in-memory `BackgroundTasks`. They are persisted in SQLite and claimed by worker threads, which provides:
+Jobs are **not** implemented with FastAPI's in-memory `BackgroundTasks`. They are persisted in PostgreSQL and claimed by worker threads, which provides:
 
 - durable queued/running/completed/failed/cancelled status;
 - continuous stage/progress/current-page updates;
@@ -232,10 +232,15 @@ curl -X POST http://localhost:8080/api/v1/indexed-books/BOOK_ID/questions/search
 ### REST-related configuration
 
 ```env
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/lessons_gpt
+JWT_SECRET=change-me-in-production-use-long-random-string
+JWT_EXPIRE_MINUTES=480
+SUPER_ADMIN_EMAIL=superadmin@lessonsgpt.com
+SUPER_ADMIN_PASSWORD=SuperAdmin123!
+SUPER_ADMIN_NAME=Super Admin
 API_HOST=0.0.0.0
 API_PORT=8080
 API_DATA_ROOT=./data
-API_JOB_DB=./data/jobs.sqlite3
 API_WORKER_COUNT=2
 API_WORKER_POLL_SECONDS=0.5
 API_MAX_UPLOAD_MB=1024

@@ -6,16 +6,80 @@ export type JobStatus =
   | 'failed'
   | 'completed'
 
+export type UserRole = 'super_admin' | 'admin' | 'student'
+
+export interface User {
+  id: string
+  email: string
+  full_name: string
+  role: UserRole
+  is_active?: boolean
+  created_at?: string
+}
+
+export interface AuthResponse {
+  access_token: string
+  token_type: string
+  user: User
+}
+
 export interface HealthResponse {
   status: string
   service: string
   version: string
   workers: number
   opensearch_index: string
+  database?: string
+}
+
+export interface CatalogPath {
+  country_id?: string
+  country_name?: string
+  education_system_id?: string
+  education_system_name?: string
+  grade_id?: string
+  grade_name?: string
+  subject_id?: string
+  subject_name?: string
+}
+
+export interface Country {
+  id: string
+  code?: string | null
+  name: string
+  name_ar?: string | null
+  is_active?: boolean
+  education_systems?: EducationSystem[]
+}
+
+export interface EducationSystem {
+  id: string
+  country_id: string
+  name: string
+  name_ar?: string | null
+  grades?: Grade[]
+}
+
+export interface Grade {
+  id: string
+  education_system_id: string
+  name: string
+  name_ar?: string | null
+  sort_order?: number
+  subjects?: Subject[]
+}
+
+export interface Subject {
+  id: string
+  grade_id: string
+  name: string
+  name_ar?: string | null
 }
 
 export interface Book {
   resource_id: string
+  subject_id?: string | null
+  catalog_path?: CatalogPath | null
   filename: string
   size_bytes: number
   sha256: string
@@ -86,4 +150,12 @@ export interface SearchRequest {
 
 export interface SearchHit {
   [key: string]: unknown
+}
+
+export interface SubjectOption {
+  id: string
+  label: string
+  countryId: string
+  systemId: string
+  gradeId: string
 }

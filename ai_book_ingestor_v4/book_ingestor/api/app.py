@@ -3,19 +3,30 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from ..config import settings
+from .auth_utils import ADMIN_ROLES, create_access_token, decode_access_token, verify_password
+from .deps import require_admin, require_admin_sse, require_super_admin
 from .job_store import JobStore
-from .models import ExtractionJobRequest, QuestionSearchRequest, SearchRequest
+from .models import (
+    CreateAdminRequest,
+    CreateCountryRequest,
+    CreateEducationSystemRequest,
+    CreateGradeRequest,
+    CreateSubjectRequest,
+    ExtractionJobRequest,
+    LoginRequest,
+    QuestionSearchRequest,
+    SearchRequest,
+)
 from .worker import ExtractionWorkerPool
 
 
@@ -25,7 +36,7 @@ JOBS_ROOT = DATA_ROOT / "jobs"
 BOOKS_ROOT.mkdir(parents=True, exist_ok=True)
 JOBS_ROOT.mkdir(parents=True, exist_ok=True)
 
-store = JobStore(settings.api_job_db)
+store = JobStore(settings.database_url)
 workers = ExtractionWorkerPool(store)
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
@@ -34,6 +45,8 @@ TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 def _public_book(book: dict[str, Any]) -> dict[str, Any]:
     return {
         "resource_id": book["resource_id"],
+        "subject_id": book.get("subject_id"),
+        "catalog_path": book.get("catalog_path"),
         "filename": book["original_filename"],
         "size_bytes": book["size_bytes"],
         "sha256": book["sha256"],
@@ -81,6 +94,23 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _catalog_metadata(subject_id: str) -> dict[str, Any]:
+    path = store.get_subject_path(subject_id)
+    if not path:
+        return {}
+    return {
+        "country": path.get("country_name"),
+        "country_id": path.get("country_id"),
+        "country_code": path.get("country_code"),
+        "education_system": path.get("education_system_name"),
+        "education_system_id": path.get("education_system_id"),
+        "grade": path.get("grade_name"),
+        "grade_id": path.get("grade_id"),
+        "subject": path.get("subject_name"),
+        "subject_id": path.get("subject_id"),
+    }
+
+
 def _load_json_artifact(job_id: str, filename: str) -> dict[str, Any]:
     job = store.get_job(job_id)
     if not job:
@@ -106,14 +136,15 @@ async def lifespan(app: FastAPI):
     workers.start()
     yield
     workers.stop()
+    store.close()
 
 
 app = FastAPI(
     title="Universal Textbook Ingestion API",
-    version="4.0.0",
+    version="4.1.0",
     description=(
-        "Persistent background extraction API for Arabic, English and mixed-language textbooks. "
-        "Tracks page extraction, question intelligence, universal visual analysis, quality validation and OpenSearch indexing."
+        "Persistent background extraction API for Arabic, English and mixed-language textbooks "
+        "with PostgreSQL catalog hierarchy and role-based admin authentication."
     ),
     lifespan=lifespan,
 )
@@ -122,7 +153,7 @@ origins = [x.strip() for x in settings.api_cors_origins.split(",") if x.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins or ["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -133,17 +164,130 @@ def health():
     return {
         "status": "ok",
         "service": "ai-book-ingestor",
-        "version": "4.0.0",
+        "version": "4.1.0",
         "workers": settings.api_worker_count,
         "opensearch_index": settings.opensearch_index,
+        "database": "postgresql",
     }
 
 
+# --- Auth ---
+
+@app.post("/api/v1/auth/login")
+def login(body: LoginRequest):
+    user = store.get_user_by_email(body.email)
+    if not user or not verify_password(body.password, user["password_hash"]):
+        raise HTTPException(401, "Invalid email or password")
+    if user.get("role") not in ADMIN_ROLES:
+        raise HTTPException(403, "Only admin users can access the admin panel")
+    if not user.get("is_active", True):
+        raise HTTPException(403, "Account is disabled")
+    token = create_access_token({"sub": user["id"], "role": user["role"], "email": user["email"]})
+    public_user = store.get_user(user["id"])
+    return {"access_token": token, "token_type": "bearer", "user": public_user}
+
+
+@app.get("/api/v1/auth/me")
+def auth_me(user: Annotated[dict, Depends(require_admin)]):
+    return user
+
+
+# --- Admin users (super_admin only) ---
+
+@app.get("/api/v1/admin/users")
+def list_admin_users(_: Annotated[dict, Depends(require_super_admin)]):
+    return {"items": store.list_users(roles=["admin", "super_admin"])}
+
+
+@app.post("/api/v1/admin/users", status_code=201)
+def create_admin_user(body: CreateAdminRequest, current: Annotated[dict, Depends(require_super_admin)]):
+    if store.get_user_by_email(body.email):
+        raise HTTPException(409, "Email already registered")
+    user = store.create_user(
+        email=body.email,
+        password=body.password,
+        full_name=body.full_name,
+        role="admin",
+        created_by=current["id"],
+    )
+    return user
+
+
+# --- Catalog hierarchy ---
+
+@app.get("/api/v1/catalog/tree")
+def catalog_tree(_: Annotated[dict, Depends(require_admin)]):
+    return {"items": store.get_catalog_tree()}
+
+
+@app.get("/api/v1/catalog/countries")
+def list_countries(_: Annotated[dict, Depends(require_admin)]):
+    return {"items": store.list_countries()}
+
+
+@app.post("/api/v1/catalog/countries", status_code=201)
+def create_country(body: CreateCountryRequest, _: Annotated[dict, Depends(require_admin)]):
+    return store.create_country(name=body.name, name_ar=body.name_ar, code=body.code)
+
+
+@app.get("/api/v1/catalog/education-systems")
+def list_education_systems(
+    _: Annotated[dict, Depends(require_admin)],
+    country_id: str | None = None,
+):
+    return {"items": store.list_education_systems(country_id=country_id)}
+
+
+@app.post("/api/v1/catalog/education-systems", status_code=201)
+def create_education_system(body: CreateEducationSystemRequest, _: Annotated[dict, Depends(require_admin)]):
+    if not store.get_country(body.country_id):
+        raise HTTPException(404, "Country not found")
+    return store.create_education_system(country_id=body.country_id, name=body.name, name_ar=body.name_ar)
+
+
+@app.get("/api/v1/catalog/grades")
+def list_grades(
+    _: Annotated[dict, Depends(require_admin)],
+    education_system_id: str | None = None,
+):
+    return {"items": store.list_grades(education_system_id=education_system_id)}
+
+
+@app.post("/api/v1/catalog/grades", status_code=201)
+def create_grade(body: CreateGradeRequest, _: Annotated[dict, Depends(require_admin)]):
+    if not store.get_education_system(body.education_system_id):
+        raise HTTPException(404, "Education system not found")
+    return store.create_grade(
+        education_system_id=body.education_system_id,
+        name=body.name,
+        name_ar=body.name_ar,
+        sort_order=body.sort_order,
+    )
+
+
+@app.get("/api/v1/catalog/subjects")
+def list_subjects(_: Annotated[dict, Depends(require_admin)], grade_id: str | None = None):
+    return {"items": store.list_subjects(grade_id=grade_id)}
+
+
+@app.post("/api/v1/catalog/subjects", status_code=201)
+def create_subject(body: CreateSubjectRequest, _: Annotated[dict, Depends(require_admin)]):
+    if not store.get_grade(body.grade_id):
+        raise HTTPException(404, "Grade not found")
+    return store.create_subject(grade_id=body.grade_id, name=body.name, name_ar=body.name_ar)
+
+
+# --- Books ---
+
 @app.post("/api/v1/books", status_code=201)
 async def upload_book(
-    file: UploadFile = File(..., description="Arabic, English, or mixed-language textbook PDF"),
-    metadata: str = Form("{}", description="Optional JSON: country/curriculum/grade/subject/semester/etc."),
+    user: Annotated[dict, Depends(require_admin)],
+    file: UploadFile = File(...),
+    subject_id: str = Form(...),
+    metadata: str = Form("{}"),
 ):
+    if not store.get_subject(subject_id):
+        raise HTTPException(404, "Subject not found in catalog")
     filename = Path(file.filename or "book.pdf").name
     if not filename.casefold().endswith(".pdf"):
         raise HTTPException(415, "Only PDF textbook uploads are accepted")
@@ -153,6 +297,8 @@ async def upload_book(
             raise ValueError("metadata must be a JSON object")
     except Exception as exc:
         raise HTTPException(422, f"Invalid metadata JSON: {exc}") from exc
+
+    metadata_obj.update(_catalog_metadata(subject_id))
 
     resource_id = uuid.uuid4().hex
     book_dir = BOOKS_ROOT / resource_id
@@ -179,7 +325,6 @@ async def upload_book(
     finally:
         await file.close()
 
-    # Basic PDF signature guard before a worker spends time on the file.
     with destination.open("rb") as check_file:
         signature = check_file.read(5)
     if signature != b"%PDF-":
@@ -193,17 +338,27 @@ async def upload_book(
         size_bytes=total,
         sha256=h.hexdigest(),
         metadata=metadata_obj,
+        subject_id=subject_id,
+        created_by=user["id"],
     )
     return _public_book(book)
 
 
 @app.get("/api/v1/books")
-def list_books(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
-    return {"items": [_public_book(x) for x in store.list_books(limit=limit, offset=offset)]}
+def list_books(
+    _: Annotated[dict, Depends(require_admin)],
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    subject_id: str | None = None,
+    grade_id: str | None = None,
+    country_id: str | None = None,
+):
+    items = store.list_books(limit=limit, offset=offset, subject_id=subject_id, grade_id=grade_id, country_id=country_id)
+    return {"items": [_public_book(x) for x in items]}
 
 
 @app.get("/api/v1/books/{resource_id}")
-def get_book(resource_id: str):
+def get_book(resource_id: str, _: Annotated[dict, Depends(require_admin)]):
     book = store.get_book(resource_id)
     if not book:
         raise HTTPException(404, "Book not found")
@@ -211,7 +366,11 @@ def get_book(resource_id: str):
 
 
 @app.post("/api/v1/books/{resource_id}/extraction-jobs", status_code=202)
-def create_extraction_job(resource_id: str, request: ExtractionJobRequest):
+def create_extraction_job(
+    resource_id: str,
+    request: ExtractionJobRequest,
+    _: Annotated[dict, Depends(require_admin)],
+):
     book = store.get_book(resource_id)
     if not book:
         raise HTTPException(404, "Book not found")
@@ -234,19 +393,18 @@ def create_extraction_job(resource_id: str, request: ExtractionJobRequest):
 
 @app.get("/api/v1/jobs")
 def list_jobs(
+    _: Annotated[dict, Depends(require_admin)],
     status: str | None = None,
     book_resource_id: str | None = None,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
-    items = store.list_jobs(
-        status=status, book_resource_id=book_resource_id, limit=limit, offset=offset
-    )
+    items = store.list_jobs(status=status, book_resource_id=book_resource_id, limit=limit, offset=offset)
     return {"items": [_public_job(x) for x in items]}
 
 
 @app.get("/api/v1/jobs/{job_id}")
-def get_job(job_id: str):
+def get_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
     job = store.get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
@@ -254,7 +412,7 @@ def get_job(job_id: str):
 
 
 @app.post("/api/v1/jobs/{job_id}/cancel", status_code=202)
-def cancel_job(job_id: str):
+def cancel_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
     job = store.request_cancel(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
@@ -264,14 +422,13 @@ def cancel_job(job_id: str):
 
 
 @app.post("/api/v1/jobs/{job_id}/retry", status_code=202)
-def retry_job(job_id: str):
+def retry_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
     old = store.get_job(job_id)
     if not old:
         raise HTTPException(404, "Job not found")
     if old["status"] not in {"failed", "cancelled"}:
         raise HTTPException(409, "Only failed or cancelled jobs can be retried")
     new_id = uuid.uuid4().hex
-    # Reuse the old output directory so resume=True can continue from extracted page artifacts.
     job = store.create_job(
         job_id=new_id,
         book_resource_id=old["book_resource_id"],
@@ -290,6 +447,7 @@ def retry_job(job_id: str):
 @app.get("/api/v1/jobs/{job_id}/events")
 def get_job_events(
     job_id: str,
+    _: Annotated[dict, Depends(require_admin)],
     after_id: int = Query(0, ge=0),
     limit: int = Query(500, ge=1, le=2000),
 ):
@@ -299,7 +457,12 @@ def get_job_events(
 
 
 @app.get("/api/v1/jobs/{job_id}/events/stream")
-async def stream_job_events(job_id: str, request: Request, after_id: int = Query(0, ge=0)):
+async def stream_job_events(
+    job_id: str,
+    request: Request,
+    _: Annotated[dict, Depends(require_admin_sse)],
+    after_id: int = Query(0, ge=0),
+):
     if not store.get_job(job_id):
         raise HTTPException(404, "Job not found")
 
@@ -325,22 +488,22 @@ async def stream_job_events(job_id: str, request: Request, after_id: int = Query
 
 
 @app.get("/api/v1/jobs/{job_id}/quality-report")
-def quality_report(job_id: str):
+def quality_report(job_id: str, _: Annotated[dict, Depends(require_admin)]):
     return _load_json_artifact(job_id, "quality_report.json")
 
 
 @app.get("/api/v1/jobs/{job_id}/manifest")
-def manifest(job_id: str):
+def manifest(job_id: str, _: Annotated[dict, Depends(require_admin)]):
     return _load_json_artifact(job_id, "manifest.json")
 
 
 @app.get("/api/v1/jobs/{job_id}/structure")
-def structure(job_id: str):
+def structure(job_id: str, _: Annotated[dict, Depends(require_admin)]):
     return _load_json_artifact(job_id, "structure.json")
 
 
 @app.get("/api/v1/jobs/{job_id}/errors")
-def job_errors(job_id: str):
+def job_errors(job_id: str, _: Annotated[dict, Depends(require_admin)]):
     job = store.get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
@@ -358,7 +521,7 @@ def job_errors(job_id: str):
 
 
 @app.get("/api/v1/jobs/{job_id}/artifacts/{relative_path:path}")
-def get_artifact(job_id: str, relative_path: str):
+def get_artifact(job_id: str, relative_path: str, _: Annotated[dict, Depends(require_admin)]):
     job = store.get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
@@ -372,7 +535,7 @@ def get_artifact(job_id: str, relative_path: str):
 
 
 @app.post("/api/v1/search")
-def search_content(request: SearchRequest):
+def search_content(request: SearchRequest, _: Annotated[dict, Depends(require_admin)]):
     try:
         items = _search_service().search(request.query, request.filters, size=request.size)
         return {"items": items}
@@ -381,7 +544,7 @@ def search_content(request: SearchRequest):
 
 
 @app.get("/api/v1/indexed-books/{book_id}/pages/{page}")
-def indexed_page(book_id: str, page: str):
+def indexed_page(book_id: str, page: str, _: Annotated[dict, Depends(require_admin)]):
     try:
         return {"items": _search_service().exact_page(book_id, page)}
     except Exception as exc:
@@ -389,7 +552,7 @@ def indexed_page(book_id: str, page: str):
 
 
 @app.get("/api/v1/indexed-books/{book_id}/questions/{page}/{number}")
-def indexed_question(book_id: str, page: str, number: str):
+def indexed_question(book_id: str, page: str, number: str, _: Annotated[dict, Depends(require_admin)]):
     try:
         return {"items": _search_service().find_question(book_id, page, number)}
     except Exception as exc:
@@ -397,7 +560,7 @@ def indexed_question(book_id: str, page: str, number: str):
 
 
 @app.post("/api/v1/indexed-books/{book_id}/questions/search")
-def indexed_question_search(book_id: str, request: QuestionSearchRequest):
+def indexed_question_search(book_id: str, request: QuestionSearchRequest, _: Annotated[dict, Depends(require_admin)]):
     try:
         items = _search_service().find_questions(
             book_id=book_id,
@@ -419,7 +582,7 @@ def indexed_question_search(book_id: str, request: QuestionSearchRequest):
 
 
 @app.get("/api/v1/indexed-questions/{question_id}/context")
-def indexed_question_context(question_id: str, radius: int = Query(2, ge=0, le=10)):
+def indexed_question_context(question_id: str, _: Annotated[dict, Depends(require_admin)], radius: int = Query(2, ge=0, le=10)):
     try:
         result = _search_service().get_question_context(question_id, radius=radius)
         if result is None:
@@ -432,7 +595,7 @@ def indexed_question_context(question_id: str, radius: int = Query(2, ge=0, le=1
 
 
 @app.get("/api/v1/indexed-assets/{asset_id}")
-def indexed_asset(asset_id: str):
+def indexed_asset(asset_id: str, _: Annotated[dict, Depends(require_admin)]):
     try:
         result = _search_service().get_asset(asset_id)
         if result is None:

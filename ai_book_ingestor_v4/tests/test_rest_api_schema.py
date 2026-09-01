@@ -6,6 +6,11 @@ def test_rest_api_routes_are_exposed():
     paths = schema["paths"]
     required = {
         "/health",
+        "/api/v1/auth/login",
+        "/api/v1/auth/me",
+        "/api/v1/admin/users",
+        "/api/v1/catalog/tree",
+        "/api/v1/catalog/countries",
         "/api/v1/books",
         "/api/v1/books/{resource_id}/extraction-jobs",
         "/api/v1/jobs/{job_id}",

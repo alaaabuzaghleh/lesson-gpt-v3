@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { JobStatus } from '../types/api'
 import { formatDateAr, statusLabel, t } from '../i18n/ar'
 
@@ -33,15 +34,24 @@ export function StatCard({
   value,
   subtitle,
   accent,
+  icon,
 }: {
   title: string
   value: string | number
   subtitle?: string
   accent?: string
+  icon?: ReactNode
 }) {
+  const style = accent
+    ? ({ '--stat-accent': accent, '--stat-accent-soft': `${accent}22` } as React.CSSProperties)
+    : undefined
+
   return (
-    <div className="stat-card" style={accent ? { borderTopColor: accent } : undefined}>
-      <div className="stat-title">{title}</div>
+    <div className="stat-card" style={style}>
+      <div className="stat-card-head">
+        <div className="stat-title">{title}</div>
+        {icon && <div className="stat-icon">{icon}</div>}
+      </div>
       <div className="stat-value">{value}</div>
       {subtitle && <div className="stat-sub">{subtitle}</div>}
     </div>
