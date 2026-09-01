@@ -13,6 +13,7 @@ ENV/
 .env
 .env.local
 .env.*.local
+!.env.example
 
 # Runtime data (uploads, job DB, extraction artifacts)
 ai_book_ingestor_v4/data/
