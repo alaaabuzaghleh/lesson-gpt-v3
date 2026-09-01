@@ -1,0 +1,56 @@
+services:
+  opensearch:
+    image: ${OPENSEARCH_IMAGE:-opensearchproject/opensearch:latest}
+    container_name: school-books-opensearch
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+      - DISABLE_SECURITY_PLUGIN=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+
+  dashboards:
+    image: ${OPENSEARCH_DASHBOARDS_IMAGE:-opensearchproject/opensearch-dashboards:latest}
+    container_name: school-books-dashboards
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    ports:
+      - "5601:5601"
+    depends_on:
+      - opensearch
+
+  api:
+    build: .
+    container_name: school-books-api
+    environment:
+      - VLM_BASE_URL=${DOCKER_VLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      - VLM_API_KEY=${VLM_API_KEY:-EMPTY}
+      - VLM_MODEL=${VLM_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}
+      - OPENSEARCH_URL=http://opensearch:9200
+      - OPENSEARCH_INDEX=${OPENSEARCH_INDEX:-school_book_content_v3}
+      - API_HOST=0.0.0.0
+      - API_PORT=8080
+      - API_DATA_ROOT=/app/data
+      - API_JOB_DB=/app/data/jobs.sqlite3
+      - API_WORKER_COUNT=${API_WORKER_COUNT:-2}
+      - API_MAX_UPLOAD_MB=${API_MAX_UPLOAD_MB:-1024}
+    ports:
+      - "8080:8080"
+    volumes:
+      - book-api-data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - opensearch
+
+volumes:
+  opensearch-data:
+  book-api-data:

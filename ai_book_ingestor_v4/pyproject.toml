@@ -1,0 +1,8 @@
+[project]
+name = "ai-book-ingestor"
+version = "4.0.0"
+description = "Universal Arabic/English textbook REST ingestion, persistent background jobs, question intelligence, visual understanding and OpenSearch indexing for agentic AI teachers"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
