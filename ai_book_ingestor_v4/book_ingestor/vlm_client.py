@@ -88,7 +88,13 @@ class OpenAICompatibleVLM:
     def __init__(self):
         self.base_url = settings.vlm_base_url.rstrip("/")
         self.endpoint = f"{self.base_url}/chat/completions"
-        self.client = httpx.Client(timeout=settings.vlm_timeout_seconds)
+        timeout = httpx.Timeout(
+            connect=30.0,
+            read=float(max(60, settings.vlm_timeout_seconds)),
+            write=120.0,
+            pool=30.0,
+        )
+        self.client = httpx.Client(timeout=timeout)
 
     def _is_ollama(self) -> bool:
         return ":11434" in self.base_url
@@ -114,8 +120,9 @@ class OpenAICompatibleVLM:
                 return self._chat_openai(system, prompt, data_urls)
             except (httpx.HTTPError, VLMError, json.JSONDecodeError) as exc:
                 last_error = exc
+                timed_out = isinstance(exc, httpx.TimeoutException) or "timed out" in str(exc).lower()
                 empty = "empty" in str(exc).lower() or "non-JSON" in str(exc)
-                if empty and self._is_ollama():
+                if empty and self._is_ollama() and not timed_out:
                     try:
                         return self._chat_ollama_native(system, prompt, image_b64)
                     except (httpx.HTTPError, VLMError, json.JSONDecodeError) as native_exc:
@@ -141,8 +148,6 @@ class OpenAICompatibleVLM:
                 {"role": "user", "content": content},
             ],
         }
-        if self._is_ollama():
-            payload["response_format"] = {"type": "json_object"}
 
         headers = {"Content-Type": "application/json"}
         if settings.vlm_api_key:
@@ -153,9 +158,6 @@ class OpenAICompatibleVLM:
             try:
                 response = self.client.post(self.endpoint, json=payload, headers=headers)
                 if response.status_code >= 400:
-                    if self._is_ollama() and payload.pop("response_format", None) and attempt < settings.max_retries:
-                        last_error = VLMError(f"VLM HTTP {response.status_code}: {response.text[:1000]}")
-                        continue
                     raise VLMError(f"VLM HTTP {response.status_code}: {response.text[:1000]}")
 
                 data = response.json()
@@ -174,6 +176,11 @@ class OpenAICompatibleVLM:
                 return _extract_json(text)
             except (httpx.HTTPError, VLMError, json.JSONDecodeError) as exc:
                 last_error = exc
+                if isinstance(exc, httpx.TimeoutException):
+                    raise VLMError(
+                        f"Vision model timed out after {settings.vlm_timeout_seconds}s. "
+                        "The Ollama 500 after 4m is the client closing the connection."
+                    ) from exc
                 if isinstance(exc, VLMError) and ("empty" in str(exc).lower() or "non-JSON" in str(exc)):
                     break
                 if attempt >= settings.max_retries:

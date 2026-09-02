@@ -46,7 +46,7 @@ Known/overridden book metadata: {meta}
 
 PDF text layer (may be incomplete, reordered, or empty; page image is authoritative):
 ---BEGIN TEXT LAYER---
-{text_layer[:22000]}
+{text_layer[:8000]}
 ---END TEXT LAYER---
 
 Extract every educationally meaningful visible block in natural reading order.

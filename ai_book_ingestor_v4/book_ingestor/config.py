@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     vlm_base_url: str = "http://localhost:8000/v1"
     vlm_api_key: str = "EMPTY"
     vlm_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
-    vlm_timeout_seconds: int = 240
+    vlm_timeout_seconds: int = 600
     vlm_max_tokens: int = 9000
     vlm_temperature: float = 0.0
     vlm_image_max_side: int = 1280
