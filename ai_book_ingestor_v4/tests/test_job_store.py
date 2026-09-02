@@ -125,3 +125,28 @@ def test_restart_recovery(store, tmp_path):
     result = store.recover_incomplete_jobs()
     assert result["requeued"] >= 1
     assert store.get_job(jid)["status"] == "queued"
+
+
+def test_fail_job_stores_error_on_event_payload(store, tmp_path):
+    book = _book(store, tmp_path)
+    job_id = uuid.uuid4().hex
+    store.create_job(
+        job_id=job_id,
+        book_resource_id=book["resource_id"],
+        output_dir=str(tmp_path / "out"),
+        start_page=1,
+        end_page=None,
+        resume=True,
+        index_to_opensearch=False,
+        recreate_index=False,
+        metadata_overrides={},
+    )
+    store.fail_job(job_id, "Vision model returned empty content", "Traceback: boom")
+    job = store.get_job(job_id)
+    assert job["status"] == "failed"
+    assert job["error"] == "Vision model returned empty content"
+    assert job["traceback"] == "Traceback: boom"
+    failed = [event for event in store.list_events(job_id) if event["event_type"] == "failed"][-1]
+    assert failed["message"] == "Vision model returned empty content"
+    assert failed["payload"]["error"] == "Vision model returned empty content"
+    assert failed["payload"]["traceback"] == "Traceback: boom"

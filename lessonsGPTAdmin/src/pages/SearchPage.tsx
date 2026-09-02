@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Search } from 'lucide-react'
 import { api } from '../api/client'
 import type { SearchHit } from '../types/api'
-import { ErrorBanner, JsonViewer } from '../components/ui'
+import { ErrorBanner, JsonViewer, TextField } from '../components/ui'
 import { t } from '../i18n/ar'
 
 export function SearchPage() {
@@ -57,20 +57,22 @@ export function SearchPage() {
             />
           </div>
           <div className="form-row-inline">
-            <label>
-              {t.search.bookIdFilter}
-              <input
-                type="text"
-                placeholder={t.search.bookIdPlaceholder}
-                value={bookId}
-                onChange={(e) => setBookId(e.target.value)}
-                dir="ltr"
-              />
-            </label>
-            <label>
-              {t.search.resultsCount}
-              <input type="number" min={1} max={100} value={size} onChange={(e) => setSize(+e.target.value)} />
-            </label>
+            <TextField
+              label={t.search.bookIdFilter}
+              type="text"
+              placeholder={t.search.bookIdPlaceholder}
+              value={bookId}
+              onChange={(e) => setBookId(e.target.value)}
+              dir="ltr"
+            />
+            <TextField
+              label={t.search.resultsCount}
+              type="number"
+              min={1}
+              max={100}
+              value={size}
+              onChange={(e) => setSize(+e.target.value)}
+            />
           </div>
           <button type="submit" className="btn btn-primary" disabled={loading || !query.trim()}>
             {loading ? t.search.searching : t.search.search}

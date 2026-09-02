@@ -4,6 +4,24 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, EmailStr, Field, model_validator
 
+from .catalog_seo import SEO_FIELD_NAMES
+
+
+class CatalogSeoInput(BaseModel):
+    seo_title_en: str | None = Field(default=None, max_length=500)
+    seo_title_ar: str | None = Field(default=None, max_length=500)
+    seo_meta_description_en: str | None = Field(default=None, max_length=1000)
+    seo_meta_description_ar: str | None = Field(default=None, max_length=1000)
+    seo_keywords_en: str | None = Field(default=None, max_length=1000)
+    seo_keywords_ar: str | None = Field(default=None, max_length=1000)
+    seo_description_en: str | None = None
+    seo_description_ar: str | None = None
+    slug_en: str | None = Field(default=None, max_length=120)
+    slug_ar: str | None = Field(default=None, max_length=120)
+
+    def seo_payload(self) -> dict[str, Any]:
+        return {k: getattr(self, k) for k in SEO_FIELD_NAMES if k != "hero_image_path" and getattr(self, k) is not None}
+
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -16,29 +34,48 @@ class CreateAdminRequest(BaseModel):
     full_name: str = Field(min_length=1, max_length=200)
 
 
-class CreateCountryRequest(BaseModel):
+class CreateCountryRequest(CatalogSeoInput):
     name: str = Field(min_length=1, max_length=200)
-    name_ar: str | None = None
+    name_ar: str = Field(min_length=1, max_length=200)
     code: str | None = Field(default=None, max_length=10)
 
 
-class CreateEducationSystemRequest(BaseModel):
+class CreateEducationSystemRequest(CatalogSeoInput):
     country_id: str
     name: str = Field(min_length=1, max_length=200)
-    name_ar: str | None = None
+    name_ar: str = Field(min_length=1, max_length=200)
 
 
-class CreateGradeRequest(BaseModel):
+class CreateGradeRequest(CatalogSeoInput):
     education_system_id: str
     name: str = Field(min_length=1, max_length=200)
-    name_ar: str | None = None
+    name_ar: str = Field(min_length=1, max_length=200)
     sort_order: int = 0
 
 
-class CreateSubjectRequest(BaseModel):
+class CreateSubjectRequest(CatalogSeoInput):
     grade_id: str
     name: str = Field(min_length=1, max_length=200)
-    name_ar: str | None = None
+    name_ar: str = Field(min_length=1, max_length=200)
+
+
+class UpdateCatalogItemRequest(CatalogSeoInput):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    name_ar: str | None = Field(default=None, min_length=1, max_length=200)
+    code: str | None = Field(default=None, max_length=10)
+    sort_order: int | None = None
+
+    def seo_updates(self) -> dict[str, Any]:
+        return self.seo_payload()
+
+    def has_catalog_updates(self) -> bool:
+        basic = (
+            self.name is not None
+            or self.name_ar is not None
+            or self.code is not None
+            or self.sort_order is not None
+        )
+        return basic or bool(self.seo_updates())
 
 
 class ExtractionJobRequest(BaseModel):

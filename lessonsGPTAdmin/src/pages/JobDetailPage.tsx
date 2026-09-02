@@ -23,7 +23,7 @@ export function JobDetailPage() {
   const [events, setEvents] = useState<JobEvent[]>([])
   const [tab, setTab] = useState<Tab>('overview')
   const [artifact, setArtifact] = useState<unknown>(null)
-  const [errors, setErrors] = useState<Record<string, unknown>[]>([])
+  const [errors, setErrors] = useState<Record<string, unknown>[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState(false)
@@ -68,6 +68,7 @@ export function JobDetailPage() {
   useEffect(() => {
     if (!jobId || tab === 'overview' || tab === 'events') return
     setArtifact(null)
+    setErrors(null)
     async function loadArtifact() {
       try {
         if (tab === 'quality') setArtifact(await api.qualityReport(jobId!))
@@ -140,6 +141,19 @@ export function JobDetailPage() {
 
       {error && <ErrorBanner message={error} />}
 
+      {(job.status === 'failed' || job.error) && (
+        <section className="failure-banner" role="alert">
+          <h2>{t.jobDetail.failureTitle}</h2>
+          <p dir="auto">{job.error || job.message || t.jobDetail.loadError}</p>
+          {job.traceback && (
+            <details>
+              <summary>{t.jobDetail.traceback}</summary>
+              <pre className="failure-trace" dir="ltr">{job.traceback}</pre>
+            </details>
+          )}
+        </section>
+      )}
+
       <section className="card">
         <ProgressBar
           value={job.progress}
@@ -173,10 +187,13 @@ export function JobDetailPage() {
               <p className="muted">{t.jobDetail.waitingEvents}</p>
             ) : (
               events.map((ev) => (
-                <div key={ev.id} className="event-row">
+                <div key={ev.id} className={`event-row${ev.event_type === 'failed' ? ' is-failed' : ''}`}>
                   <span className="event-type">{ev.event_type}</span>
                   <span className="muted">{formatDate(ev.created_at)}</span>
-                  <pre dir="ltr">{JSON.stringify(ev.payload, null, 2)}</pre>
+                  {ev.message && <p className="event-message">{ev.message}</p>}
+                  {ev.payload != null && (
+                    <pre dir="ltr">{JSON.stringify(ev.payload, null, 2)}</pre>
+                  )}
                 </div>
               ))
             )}
@@ -186,7 +203,9 @@ export function JobDetailPage() {
         {tab === 'quality' && (artifact ? <JsonViewer data={artifact} /> : <LoadingSpinner />)}
         {tab === 'manifest' && (artifact ? <JsonViewer data={artifact} /> : <LoadingSpinner />)}
         {tab === 'errors' && (
-          errors.length === 0 ? (
+          errors == null ? (
+            <LoadingSpinner />
+          ) : errors.length === 0 ? (
             <p className="muted">{t.jobDetail.noErrors}</p>
           ) : (
             <JsonViewer data={errors} />

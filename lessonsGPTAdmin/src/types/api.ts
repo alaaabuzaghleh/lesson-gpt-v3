@@ -32,6 +32,35 @@ export interface HealthResponse {
   database?: string
 }
 
+export interface CatalogSeo {
+  seo_title_en?: string | null
+  seo_title_ar?: string | null
+  seo_meta_description_en?: string | null
+  seo_meta_description_ar?: string | null
+  seo_keywords_en?: string | null
+  seo_keywords_ar?: string | null
+  seo_description_en?: string | null
+  seo_description_ar?: string | null
+  slug_en?: string | null
+  slug_ar?: string | null
+  hero_image_path?: string | null
+}
+
+export type CatalogEntityType = 'country' | 'system' | 'grade' | 'subject'
+
+export interface UpdateCatalogSeoPayload {
+  seo_title_en?: string
+  seo_title_ar?: string
+  seo_meta_description_en?: string
+  seo_meta_description_ar?: string
+  seo_keywords_en?: string
+  seo_keywords_ar?: string
+  seo_description_en?: string
+  seo_description_ar?: string
+  slug_en?: string
+  slug_ar?: string
+}
+
 export interface CatalogPath {
   country_id?: string
   country_name?: string
@@ -49,6 +78,9 @@ export interface Country {
   name: string
   name_ar?: string | null
   is_active?: boolean
+  seo?: CatalogSeo
+  hero_image_url?: string
+  has_custom_hero?: boolean
   education_systems?: EducationSystem[]
 }
 
@@ -57,6 +89,9 @@ export interface EducationSystem {
   country_id: string
   name: string
   name_ar?: string | null
+  seo?: CatalogSeo
+  hero_image_url?: string
+  has_custom_hero?: boolean
   grades?: Grade[]
 }
 
@@ -66,6 +101,9 @@ export interface Grade {
   name: string
   name_ar?: string | null
   sort_order?: number
+  seo?: CatalogSeo
+  hero_image_url?: string
+  has_custom_hero?: boolean
   subjects?: Subject[]
 }
 
@@ -74,6 +112,9 @@ export interface Subject {
   grade_id: string
   name: string
   name_ar?: string | null
+  seo?: CatalogSeo
+  hero_image_url?: string
+  has_custom_hero?: boolean
 }
 
 export interface Book {
@@ -117,6 +158,7 @@ export interface ExtractionJob {
   indexed_records: number | null
   result: Record<string, unknown> | null
   error: string | null
+  traceback?: string | null
   retry_of: string | null
   created_at: string
   started_at: string | null
@@ -129,7 +171,10 @@ export interface JobEvent {
   id: number
   job_id: string
   event_type: string
-  payload: Record<string, unknown>
+  stage?: string | null
+  progress?: number | null
+  message?: string | null
+  payload: Record<string, unknown> | null
   created_at: string
 }
 

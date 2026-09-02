@@ -33,10 +33,11 @@ def api_client(tmp_path, monkeypatch):
     books_root.mkdir(parents=True)
     jobs_root.mkdir(parents=True)
 
-    country = test_store.create_country(name="Jordan", code=f"JO-{uuid.uuid4().hex[:8]}")
-    system = test_store.create_education_system(country_id=country["id"], name="National")
-    grade = test_store.create_grade(education_system_id=system["id"], name="Grade 8", sort_order=8)
-    subject = test_store.create_subject(grade_id=grade["id"], name="Science")
+    suffix = uuid.uuid4().hex[:8]
+    country = test_store.create_country(name=f"Jordan-{suffix}", name_ar=f"الأردن-{suffix}", code=f"JO-{suffix}")
+    system = test_store.create_education_system(country_id=country["id"], name=f"National-{suffix}", name_ar=f"الوطني-{suffix}")
+    grade = test_store.create_grade(education_system_id=system["id"], name=f"Grade 8-{suffix}", name_ar=f"الصف الثامن-{suffix}", sort_order=8)
+    subject = test_store.create_subject(grade_id=grade["id"], name=f"Science-{suffix}", name_ar=f"العلوم-{suffix}")
 
     admin = test_store.create_user(
         email=f"admin-{uuid.uuid4().hex[:8]}@example.com",
@@ -89,6 +90,53 @@ def test_upload_create_track_cancel_job(api_client):
     events = client.get(f"/api/v1/jobs/{job_id}/events", headers=headers).json()["items"]
     assert "queued" in [x["event_type"] for x in events]
     assert "cancelled" in [x["event_type"] for x in events]
+
+    deleted = client.delete(f"/api/v1/books/{resource_id}", headers=headers)
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert client.get(f"/api/v1/books/{resource_id}", headers=headers).status_code == 404
+
+
+def test_failed_job_exposes_error_and_traceback(api_client):
+    client, headers, subject_id, store = api_client
+    response = client.post(
+        "/api/v1/books",
+        headers=headers,
+        files={"file": ("كتاب.pdf", b"%PDF-1.4\n%%EOF", "application/pdf")},
+        data={"metadata": json.dumps({"language": "ar"}), "subject_id": subject_id},
+    )
+    assert response.status_code == 201
+    resource_id = response.json()["resource_id"]
+
+    created = client.post(
+        f"/api/v1/books/{resource_id}/extraction-jobs",
+        headers=headers,
+        json={"start_page": 1, "resume": True, "index_to_opensearch": False},
+    )
+    assert created.status_code == 202
+    job_id = created.json()["job_id"]
+
+    store.fail_job(
+        job_id,
+        "Vision model returned an empty response (no JSON content)",
+        "Traceback (most recent call last):\n  File worker.py",
+    )
+
+    detail = client.get(f"/api/v1/jobs/{job_id}", headers=headers).json()
+    assert detail["status"] == "failed"
+    assert "empty response" in detail["error"]
+    assert "Traceback" in (detail["traceback"] or "")
+
+    errors = client.get(f"/api/v1/jobs/{job_id}/errors", headers=headers).json()["items"]
+    assert errors
+    assert errors[0]["source"] == "job"
+    assert "empty response" in errors[0]["error"]
+
+    events = client.get(f"/api/v1/jobs/{job_id}/events", headers=headers).json()["items"]
+    failed = [item for item in events if item["event_type"] == "failed"]
+    assert failed
+    assert failed[-1]["message"]
+    assert failed[-1]["payload"]["error"]
 
 
 def test_student_cannot_login(api_client):

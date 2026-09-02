@@ -52,6 +52,7 @@ PDF text layer (may be incomplete, reordered, or empty; page image is authoritat
 Extract every educationally meaningful visible block in natural reading order.
 Allowed content_type values:
 {json.dumps(CONTENT_TYPES, ensure_ascii=False)}
+Never invent a new content_type. For generic titles/headings use section_heading, lesson_title, chapter_title, or unit_title — never "title".
 For every student-facing question/exercise/problem, prefer the unified content_type "question"; legacy question-like values exist only for backward compatibility.
 
 Return exactly:

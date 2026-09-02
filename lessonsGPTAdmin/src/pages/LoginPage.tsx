@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
-import { GraduationCap, Sparkles } from 'lucide-react'
+import { GraduationCap, Sparkles, Mail, Lock } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { ThemeToggle } from '../components/ThemeToggle'
-import { ErrorBanner, LoadingSpinner } from '../components/ui'
+import { ErrorBanner, LoadingSpinner, TextField } from '../components/ui'
 import { t } from '../i18n/ar'
 
 export function LoginPage() {
@@ -71,29 +71,27 @@ export function LoginPage() {
           <h1>{t.auth.loginTitle}</h1>
           <p className="muted">{t.auth.loginSubtitle}</p>
           {error && <ErrorBanner message={error} />}
-          <label>
-            {t.auth.email}
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              dir="ltr"
-              autoComplete="email"
-              placeholder="admin@example.com"
-            />
-          </label>
-          <label>
-            {t.auth.password}
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              dir="ltr"
-              autoComplete="current-password"
-            />
-          </label>
+          <TextField
+            label={t.auth.email}
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            icon={<Mail size={18} />}
+            required
+            dir="ltr"
+            autoComplete="email"
+            placeholder="admin@example.com"
+          />
+          <TextField
+            label={t.auth.password}
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            icon={<Lock size={18} />}
+            required
+            dir="ltr"
+            autoComplete="current-password"
+          />
           <button type="submit" className="btn btn-primary btn-lg" disabled={submitting}>
             {submitting ? t.auth.loggingIn : t.auth.login}
           </button>

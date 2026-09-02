@@ -73,16 +73,28 @@ class BookIngestionPipeline:
         self.visual_analyzer = UniversalVisualAnalyzer(self.vlm, self.output_dir)
         self.question_intelligence = QuestionIntelligenceEngine()
 
-    def detect_metadata(self, max_pages: int = 6) -> BookMetadata:
-        pages = [self.reader.render_page(n) for n in range(1, min(max_pages, self.reader.page_count) + 1)]
-        prompt = BOOK_METADATA_PROMPT + "\nThe supplied images correspond to PDF pages: " + ", ".join(
-            str(x.pdf_page_number) for x in pages
-        )
-        raw = self.vlm.chat_json(BOOK_METADATA_SYSTEM, prompt, [x.as_data_url() for x in pages])
-        (self.raw_dir / "book_metadata.json").write_bytes(
-            orjson.dumps(raw, option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS)
-        )
-        return BookMetadata.model_validate(raw)
+    def detect_metadata(self, max_pages: int = 2) -> BookMetadata:
+        page_count = min(max_pages, self.reader.page_count)
+        last_error: Exception | None = None
+        for count in (page_count, 1):
+            if count < 1:
+                break
+            pages = [self.reader.render_page(n) for n in range(1, count + 1)]
+            prompt = BOOK_METADATA_PROMPT + "\nThe supplied images correspond to PDF pages: " + ", ".join(
+                str(x.pdf_page_number) for x in pages
+            )
+            try:
+                raw = self.vlm.chat_json(BOOK_METADATA_SYSTEM, prompt, [x.as_data_url() for x in pages])
+                (self.raw_dir / "book_metadata.json").write_bytes(
+                    orjson.dumps(raw, option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS)
+                )
+                return BookMetadata.model_validate(raw)
+            except Exception as exc:
+                last_error = exc
+                if count <= 1:
+                    break
+        assert last_error is not None
+        raise last_error
 
     def extract_page(self, page: PageData, metadata: BookMetadata, resume: bool = True) -> PageExtraction:
         out = self.extracted_dir / f"page_{page.pdf_page_number:04d}.json"
@@ -530,7 +542,23 @@ class BookIngestionPipeline:
 
         check_cancel()
         emit("metadata", 1.0, "Detecting textbook metadata")
-        detected = self.detect_metadata()
+        try:
+            detected = self.detect_metadata()
+        except JobCancelled:
+            raise
+        except Exception as exc:
+            fallback = {
+                "stage": "metadata_detection",
+                "error": str(exc),
+                "fallback": "catalog_and_filename",
+            }
+            with (self.output_dir / "errors.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(fallback, ensure_ascii=False) + "\n")
+            console.print(
+                f"[yellow]Metadata detection failed ({exc}); continuing with catalog metadata[/yellow]"
+            )
+            emit("metadata", 3.0, "Vision metadata failed; using catalog data")
+            detected = BookMetadata(title=self.pdf_path.stem, confidence=0.2)
         metadata = merge_metadata(detected, overrides)
         book_id = stable_book_id(self.pdf_path, metadata)
         (self.output_dir / "book_metadata.final.json").write_text(

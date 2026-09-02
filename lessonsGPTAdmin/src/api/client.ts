@@ -1,14 +1,19 @@
 import type {
   AuthResponse,
   Book,
+  CatalogEntityType,
   Country,
+  EducationSystem,
   ExtractionJob,
   ExtractionJobRequest,
+  Grade,
   HealthResponse,
   JobEvent,
   SearchHit,
   SearchRequest,
+  Subject,
   SubjectOption,
+  UpdateCatalogSeoPayload,
   User,
 } from '../types/api'
 
@@ -64,7 +69,47 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  catalogTree: () => request<{ items: Country[] }>('/api/v1/catalog/tree'),
+  catalogTree: () =>
+    request<{ items: Country[] }>(`/api/v1/catalog/tree?t=${Date.now()}`),
+
+  listCountries: () => request<{ items: Country[] }>('/api/v1/catalog/countries'),
+
+  listEducationSystems: (countryId?: string) => {
+    const q = countryId ? `?country_id=${encodeURIComponent(countryId)}` : ''
+    return request<{ items: EducationSystem[] }>(`/api/v1/catalog/education-systems${q}`)
+  },
+
+  listGrades: (educationSystemId?: string) => {
+    const q = educationSystemId ? `?education_system_id=${encodeURIComponent(educationSystemId)}` : ''
+    return request<{ items: Grade[] }>(`/api/v1/catalog/grades${q}`)
+  },
+
+  listSubjects: (gradeId?: string) => {
+    const q = gradeId ? `?grade_id=${encodeURIComponent(gradeId)}` : ''
+    return request<{ items: Subject[] }>(`/api/v1/catalog/subjects${q}`)
+  },
+
+  getCountry: (id: string) => request<Country>(`/api/v1/catalog/countries/${id}`),
+
+  getEducationSystem: (id: string) =>
+    request<EducationSystem>(`/api/v1/catalog/education-systems/${id}`),
+
+  getGrade: (id: string) => request<Grade>(`/api/v1/catalog/grades/${id}`),
+
+  getSubject: (id: string) => request<Subject>(`/api/v1/catalog/subjects/${id}`),
+
+  getCatalogItem: (type: CatalogEntityType, id: string) => {
+    switch (type) {
+      case 'country':
+        return api.getCountry(id)
+      case 'system':
+        return api.getEducationSystem(id)
+      case 'grade':
+        return api.getGrade(id)
+      case 'subject':
+        return api.getSubject(id)
+    }
+  },
 
   createCountry: (body: { name: string; name_ar?: string; code?: string }) =>
     request<Country>('/api/v1/catalog/countries', {
@@ -94,6 +139,106 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  updateCountry: (id: string, body: Record<string, unknown>) =>
+    request<Country>(`/api/v1/catalog/countries/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  deleteCountry: (id: string) =>
+    request<void>(`/api/v1/catalog/countries/${id}`, { method: 'DELETE' }),
+
+  updateEducationSystem: (id: string, body: Record<string, unknown>) =>
+    request(`/api/v1/catalog/education-systems/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  deleteEducationSystem: (id: string) =>
+    request<void>(`/api/v1/catalog/education-systems/${id}`, { method: 'DELETE' }),
+
+  updateGrade: (id: string, body: Record<string, unknown>) =>
+    request(`/api/v1/catalog/grades/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  deleteGrade: (id: string) =>
+    request<void>(`/api/v1/catalog/grades/${id}`, { method: 'DELETE' }),
+
+  updateSubject: (id: string, body: Record<string, unknown>) =>
+    request(`/api/v1/catalog/subjects/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  updateCatalogSeo: (type: CatalogEntityType, id: string, body: UpdateCatalogSeoPayload) =>
+    api.updateCatalogItem(type, id, body as Record<string, unknown>),
+
+  updateCatalogItem: (type: CatalogEntityType, id: string, body: Record<string, unknown>) => {
+    switch (type) {
+      case 'country':
+        return api.updateCountry(id, body)
+      case 'system':
+        return api.updateEducationSystem(id, body)
+      case 'grade':
+        return api.updateGrade(id, body)
+      case 'subject':
+        return api.updateSubject(id, body)
+    }
+  },
+
+  createCountryFull: (body: Record<string, unknown>) =>
+    request<Country>('/api/v1/catalog/countries', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  createEducationSystemFull: (body: Record<string, unknown>) =>
+    request('/api/v1/catalog/education-systems', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  createGradeFull: (body: Record<string, unknown>) =>
+    request('/api/v1/catalog/grades', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  createSubjectFull: (body: Record<string, unknown>) =>
+    request('/api/v1/catalog/subjects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  uploadCatalogHero: async (type: CatalogEntityType, id: string, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request(`/api/v1/catalog/${type}/${id}/hero`, { method: 'POST', body: form })
+  },
+
+  deleteCatalogHero: (type: CatalogEntityType, id: string) =>
+    request(`/api/v1/catalog/${type}/${id}/hero`, { method: 'DELETE' }),
+
+  catalogHeroUrl: (type: CatalogEntityType, id: string, cacheBust?: number) => {
+    const suffix = cacheBust ? `?t=${cacheBust}` : ''
+    return `${BASE}/api/v1/catalog/hero/${type}/${id}${suffix}`
+  },
+
+  deleteSubject: (id: string) =>
+    request<{ deleted: boolean; linked_books: number }>(`/api/v1/catalog/subjects/${id}`, {
+      method: 'DELETE',
+    }),
+
   health: () => request<HealthResponse>('/health'),
 
   listBooks: (params?: { limit?: number; offset?: number; subject_id?: string }) => {
@@ -105,6 +250,11 @@ export const api = {
   },
 
   getBook: (resourceId: string) => request<Book>(`/api/v1/books/${resourceId}`),
+
+  deleteBook: (resourceId: string) =>
+    request<{ deleted: boolean; deleted_jobs: number }>(`/api/v1/books/${resourceId}`, {
+      method: 'DELETE',
+    }),
 
   uploadBook: async (file: File, subjectId: string, metadata: Record<string, unknown>) => {
     const form = new FormData()

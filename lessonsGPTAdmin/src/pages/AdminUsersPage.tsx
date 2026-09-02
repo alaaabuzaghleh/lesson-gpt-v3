@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Mail, User, Lock } from 'lucide-react'
 import { api } from '../api/client'
-import type { User } from '../types/api'
-import { ErrorBanner, LoadingSpinner } from '../components/ui'
+import type { User as AdminUser } from '../types/api'
+import { ErrorBanner, LoadingSpinner, TextField } from '../components/ui'
 import { t } from '../i18n/ar'
 
 export function AdminUsersPage() {
-  const [users, setUsers] = useState<User[]>([])
+  const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [email, setEmail] = useState('')
@@ -55,9 +56,38 @@ export function AdminUsersPage() {
       <section className="card">
         <h2>{t.admin.createTitle}</h2>
         <form className="form-stack" onSubmit={createAdmin}>
-          <input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder={t.admin.fullName} required />
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder={t.auth.email} required dir="ltr" />
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t.auth.password} required minLength={8} dir="ltr" />
+          <TextField
+            label={t.admin.fullName}
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+            placeholder={t.admin.fullName}
+            icon={<User size={18} />}
+            required
+          />
+          <TextField
+            label={t.auth.email}
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="admin@example.com"
+            icon={<Mail size={18} />}
+            required
+            dir="ltr"
+            autoComplete="email"
+          />
+          <TextField
+            label={t.auth.password}
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder={t.auth.password}
+            icon={<Lock size={18} />}
+            required
+            minLength={8}
+            dir="ltr"
+            autoComplete="new-password"
+            hint={t.admin.passwordHint}
+          />
           <button type="submit" className="btn btn-primary">{t.admin.create}</button>
         </form>
       </section>

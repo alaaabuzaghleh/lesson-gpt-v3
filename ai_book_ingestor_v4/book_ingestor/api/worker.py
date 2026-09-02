@@ -154,4 +154,5 @@ class ExtractionWorkerPool:
         except JobCancelled as exc:
             self.store.mark_cancelled(job_id, str(exc))
         except Exception as exc:
-            self.store.fail_job(job_id, repr(exc), traceback.format_exc())
+            message = str(exc).strip() or repr(exc)
+            self.store.fail_job(job_id, message, traceback.format_exc())

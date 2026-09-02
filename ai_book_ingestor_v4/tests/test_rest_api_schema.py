@@ -12,6 +12,7 @@ def test_rest_api_routes_are_exposed():
         "/api/v1/catalog/tree",
         "/api/v1/catalog/countries",
         "/api/v1/books",
+        "/api/v1/books/{resource_id}",
         "/api/v1/books/{resource_id}/extraction-jobs",
         "/api/v1/jobs/{job_id}",
         "/api/v1/jobs/{job_id}/cancel",
@@ -20,6 +21,7 @@ def test_rest_api_routes_are_exposed():
         "/api/v1/jobs/{job_id}/events/stream",
         "/api/v1/jobs/{job_id}/quality-report",
         "/api/v1/jobs/{job_id}/manifest",
+        "/api/v1/jobs/{job_id}/errors",
         "/api/v1/search",
         "/api/v1/indexed-books/{book_id}/questions/search",
     }

@@ -12,6 +12,18 @@ from psycopg_pool import ConnectionPool
 
 from ..config import settings
 from .auth_utils import ALL_ROLES, hash_password
+from .catalog_seo import (
+    CATALOG_TABLES,
+    CatalogDuplicateError,
+    ENTITY_PARENT_SCOPE,
+    ENTITY_TABLE,
+    SEO_COLUMN_DEFS,
+    SEO_FIELD_NAMES,
+    UNIQUE_CATALOG_COLUMNS,
+    enrich_catalog_item,
+    prepare_seo_payload,
+    seo_defaults,
+)
 
 
 def utcnow() -> datetime:
@@ -129,6 +141,9 @@ CREATE INDEX IF NOT EXISTS idx_grades_system ON grades(education_system_id, sort
 CREATE INDEX IF NOT EXISTS idx_subjects_grade ON subjects(grade_id);
 """
 
+# Disable server-side prepared plans; ALTER TABLE (SEO migration) changes SELECT * shape.
+_POOL_KWARGS = {"row_factory": dict_row, "prepare_threshold": None}
+
 
 class JobStore:
     """PostgreSQL-backed persistent store for catalog, users, books, and jobs."""
@@ -136,17 +151,141 @@ class JobStore:
     def __init__(self, database_url: str | None = None):
         self.database_url = database_url or settings.database_url
         self._init_lock = threading.Lock()
-        self.pool = ConnectionPool(self.database_url, kwargs={"row_factory": dict_row}, open=True)
+        self.pool = ConnectionPool(self.database_url, kwargs=_POOL_KWARGS, open=True)
         self.initialize()
 
     def close(self) -> None:
         self.pool.close()
 
+    def _reset_pool_after_schema_change(self) -> None:
+        """Replace pooled connections after ALTER TABLE so no stale cached plans remain."""
+        old_pool = self.pool
+        self.pool = ConnectionPool(self.database_url, kwargs=_POOL_KWARGS, open=True)
+        old_pool.close()
+
     def initialize(self) -> None:
         with self._init_lock, self.pool.connection() as conn:
             conn.execute(SCHEMA_SQL)
+            self._migrate_catalog_seo(conn)
             conn.commit()
             self._seed_super_admin(conn)
+        self._reset_pool_after_schema_change()
+
+    def _dedupe_active_catalog(self, conn: psycopg.Connection) -> None:
+        for table, entity_type in (
+            ("countries", "country"),
+            ("education_systems", "system"),
+            ("grades", "grade"),
+            ("subjects", "subject"),
+        ):
+            scope_col = ENTITY_PARENT_SCOPE[entity_type]
+            group_cols = ([scope_col] if scope_col else []) + ["LOWER(TRIM({col}))"]
+            for col in UNIQUE_CATALOG_COLUMNS:
+                group_by = ", ".join(group_cols).format(col=col)
+                having_scope = f"{scope_col}, " if scope_col else ""
+                rows = conn.execute(
+                    f"""
+                    SELECT {having_scope}LOWER(TRIM({col})) AS val,
+                           array_agg(id ORDER BY created_at) AS ids
+                    FROM {table}
+                    WHERE is_active=TRUE AND {col} IS NOT NULL AND TRIM({col}) <> ''
+                    GROUP BY {group_by}
+                    HAVING COUNT(*) > 1
+                    """
+                ).fetchall()
+                for row in rows:
+                    for dup_id in row["ids"][1:]:
+                        conn.execute(f"UPDATE {table} SET is_active=FALSE WHERE id=%s", (dup_id,))
+
+    def _validate_catalog_uniqueness(
+        self,
+        conn: psycopg.Connection,
+        entity_type: str,
+        *,
+        name: str,
+        name_ar: str | None,
+        slug_en: str | None,
+        slug_ar: str | None,
+        parent_id: str | None,
+        exclude_id: str | None = None,
+    ) -> None:
+        table = ENTITY_TABLE[entity_type]
+        scope_col = ENTITY_PARENT_SCOPE[entity_type]
+        labels = {
+            "name": "English name already exists in this scope",
+            "name_ar": "Arabic name already exists in this scope",
+            "slug_en": "English slug already exists in this scope",
+            "slug_ar": "Arabic slug already exists in this scope",
+        }
+        values = {
+            "name": name,
+            "name_ar": name_ar,
+            "slug_en": slug_en,
+            "slug_ar": slug_ar,
+        }
+        for col, val in values.items():
+            if val is None or not str(val).strip():
+                continue
+            clauses = ["is_active=TRUE", f"LOWER(TRIM({col}))=LOWER(TRIM(%s))"]
+            params: list[Any] = [str(val).strip()]
+            if scope_col:
+                clauses.append(f"{scope_col}=%s")
+                params.append(parent_id)
+            if exclude_id:
+                clauses.append("id<>%s")
+                params.append(exclude_id)
+            row = conn.execute(
+                f"SELECT id FROM {table} WHERE {' AND '.join(clauses)} LIMIT 1",
+                params,
+            ).fetchone()
+            if row:
+                raise CatalogDuplicateError(labels[col], field=col)
+
+    def _merged_seo_row(
+        self,
+        current: dict[str, Any],
+        *,
+        name: str | None,
+        name_ar: str | None,
+        seo_patch: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        base_name = name if name is not None else current["name"]
+        base_name_ar = name_ar if name_ar is not None else current.get("name_ar")
+        current_seo = {k: current.get(k) for k in SEO_FIELD_NAMES if k != "hero_image_path"}
+        merged = {**current_seo, **(seo_patch or {})}
+        return prepare_seo_payload(base_name, base_name_ar, merged)
+
+    def _apply_seo_to_row(self, conn: psycopg.Connection, table: str, row_id: str, seo_data: dict[str, str]) -> None:
+        sets = ", ".join(f"{k}=%s" for k in seo_data)
+        conn.execute(f"UPDATE {table} SET {sets} WHERE id=%s", (*seo_data.values(), row_id))
+
+    def _migrate_catalog_seo(self, conn: psycopg.Connection) -> None:
+        for table in CATALOG_TABLES:
+            for col, col_type in SEO_COLUMN_DEFS:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
+        self._backfill_catalog_seo(conn)
+        self._dedupe_active_catalog(conn)
+
+    def _backfill_catalog_seo(self, conn: psycopg.Connection) -> None:
+        for table in CATALOG_TABLES:
+            rows = conn.execute(
+                f"SELECT id, name, name_ar FROM {table} WHERE slug_en IS NULL OR slug_en = ''"
+            ).fetchall()
+            for row in rows:
+                self._seed_seo_defaults(conn, table, row["id"], row["name"], row.get("name_ar"))
+
+    def _seed_seo_defaults(self, conn: psycopg.Connection, table: str, row_id: str, name: str, name_ar: str | None) -> None:
+        defaults = seo_defaults(name, name_ar)
+        sets = ", ".join(f"{k}=%s" for k in defaults)
+        conn.execute(f"UPDATE {table} SET {sets} WHERE id=%s", (*defaults.values(), row_id))
+
+    def _merge_seo_fields(self, fields: list[str], params: list[Any], seo: dict[str, Any] | None) -> None:
+        if not seo:
+            return
+        for key in SEO_FIELD_NAMES:
+            if key in seo:
+                fields.append(f"{key}=%s")
+                params.append(seo[key])
 
     def _seed_super_admin(self, conn: psycopg.Connection) -> None:
         row = conn.execute("SELECT id FROM users LIMIT 1").fetchone()
@@ -240,19 +379,45 @@ class JobStore:
 
     # --- Catalog ---
 
-    def create_country(self, *, name: str, name_ar: str | None = None, code: str | None = None) -> dict[str, Any]:
+    def create_country(
+        self,
+        *,
+        name: str,
+        name_ar: str,
+        code: str | None = None,
+        seo: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        seo_data = prepare_seo_payload(name, name_ar, seo)
         cid = str(uuid.uuid4())
         with self.pool.connection() as conn:
+            self._validate_catalog_uniqueness(
+                conn,
+                "country",
+                name=name,
+                name_ar=name_ar,
+                slug_en=seo_data["slug_en"],
+                slug_ar=seo_data["slug_ar"],
+                parent_id=None,
+            )
+            if code:
+                row = conn.execute(
+                    "SELECT id FROM countries WHERE is_active=TRUE AND LOWER(TRIM(code))=LOWER(TRIM(%s))",
+                    (code,),
+                ).fetchone()
+                if row:
+                    raise CatalogDuplicateError("Country code already exists", field="code")
             conn.execute(
                 "INSERT INTO countries(id, code, name, name_ar) VALUES (%s, %s, %s, %s)",
                 (cid, code, name, name_ar),
             )
+            self._apply_seo_to_row(conn, "countries", cid, seo_data)
             conn.commit()
         return self.get_country(cid)  # type: ignore[return-value]
 
     def get_country(self, country_id: str) -> dict[str, Any] | None:
         with self.pool.connection() as conn:
-            return self._normalize_row(conn.execute("SELECT * FROM countries WHERE id=%s", (country_id,)).fetchone())
+            row = self._normalize_row(conn.execute("SELECT * FROM countries WHERE id=%s", (country_id,)).fetchone())
+        return enrich_catalog_item(row, "country") if row else None
 
     def list_countries(self, *, active_only: bool = True) -> list[dict[str, Any]]:
         q = "SELECT * FROM countries"
@@ -261,23 +426,46 @@ class JobStore:
         q += " ORDER BY name"
         with self.pool.connection() as conn:
             rows = conn.execute(q).fetchall()
-        return [self._normalize_row(r) for r in rows if r is not None]  # type: ignore[list-item]
+        return [
+            enrich_catalog_item(self._normalize_row(r), "country")
+            for r in rows
+            if r is not None
+        ]  # type: ignore[list-item]
 
-    def create_education_system(self, *, country_id: str, name: str, name_ar: str | None = None) -> dict[str, Any]:
+    def create_education_system(
+        self,
+        *,
+        country_id: str,
+        name: str,
+        name_ar: str,
+        seo: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        seo_data = prepare_seo_payload(name, name_ar, seo)
         sid = str(uuid.uuid4())
         with self.pool.connection() as conn:
+            self._validate_catalog_uniqueness(
+                conn,
+                "system",
+                name=name,
+                name_ar=name_ar,
+                slug_en=seo_data["slug_en"],
+                slug_ar=seo_data["slug_ar"],
+                parent_id=country_id,
+            )
             conn.execute(
                 "INSERT INTO education_systems(id, country_id, name, name_ar) VALUES (%s, %s, %s, %s)",
                 (sid, country_id, name, name_ar),
             )
+            self._apply_seo_to_row(conn, "education_systems", sid, seo_data)
             conn.commit()
         return self.get_education_system(sid)  # type: ignore[return-value]
 
     def get_education_system(self, system_id: str) -> dict[str, Any] | None:
         with self.pool.connection() as conn:
-            return self._normalize_row(
+            row = self._normalize_row(
                 conn.execute("SELECT * FROM education_systems WHERE id=%s", (system_id,)).fetchone()
             )
+        return enrich_catalog_item(row, "system") if row else None
 
     def list_education_systems(self, *, country_id: str | None = None, active_only: bool = True) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -292,23 +480,45 @@ class JobStore:
             rows = conn.execute(
                 f"SELECT * FROM education_systems{where} ORDER BY name", params
             ).fetchall()
-        return [self._normalize_row(r) for r in rows if r is not None]  # type: ignore[list-item]
+        return [
+            enrich_catalog_item(self._normalize_row(r), "system")
+            for r in rows
+            if r is not None
+        ]  # type: ignore[list-item]
 
     def create_grade(
-        self, *, education_system_id: str, name: str, name_ar: str | None = None, sort_order: int = 0
+        self,
+        *,
+        education_system_id: str,
+        name: str,
+        name_ar: str,
+        sort_order: int = 0,
+        seo: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        seo_data = prepare_seo_payload(name, name_ar, seo)
         gid = str(uuid.uuid4())
         with self.pool.connection() as conn:
+            self._validate_catalog_uniqueness(
+                conn,
+                "grade",
+                name=name,
+                name_ar=name_ar,
+                slug_en=seo_data["slug_en"],
+                slug_ar=seo_data["slug_ar"],
+                parent_id=education_system_id,
+            )
             conn.execute(
                 "INSERT INTO grades(id, education_system_id, name, name_ar, sort_order) VALUES (%s, %s, %s, %s, %s)",
                 (gid, education_system_id, name, name_ar, sort_order),
             )
+            self._apply_seo_to_row(conn, "grades", gid, seo_data)
             conn.commit()
         return self.get_grade(gid)  # type: ignore[return-value]
 
     def get_grade(self, grade_id: str) -> dict[str, Any] | None:
         with self.pool.connection() as conn:
-            return self._normalize_row(conn.execute("SELECT * FROM grades WHERE id=%s", (grade_id,)).fetchone())
+            row = self._normalize_row(conn.execute("SELECT * FROM grades WHERE id=%s", (grade_id,)).fetchone())
+        return enrich_catalog_item(row, "grade") if row else None
 
     def list_grades(self, *, education_system_id: str | None = None, active_only: bool = True) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -323,21 +533,44 @@ class JobStore:
             rows = conn.execute(
                 f"SELECT * FROM grades{where} ORDER BY sort_order, name", params
             ).fetchall()
-        return [self._normalize_row(r) for r in rows if r is not None]  # type: ignore[list-item]
+        return [
+            enrich_catalog_item(self._normalize_row(r), "grade")
+            for r in rows
+            if r is not None
+        ]  # type: ignore[list-item]
 
-    def create_subject(self, *, grade_id: str, name: str, name_ar: str | None = None) -> dict[str, Any]:
+    def create_subject(
+        self,
+        *,
+        grade_id: str,
+        name: str,
+        name_ar: str,
+        seo: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        seo_data = prepare_seo_payload(name, name_ar, seo)
         sid = str(uuid.uuid4())
         with self.pool.connection() as conn:
+            self._validate_catalog_uniqueness(
+                conn,
+                "subject",
+                name=name,
+                name_ar=name_ar,
+                slug_en=seo_data["slug_en"],
+                slug_ar=seo_data["slug_ar"],
+                parent_id=grade_id,
+            )
             conn.execute(
                 "INSERT INTO subjects(id, grade_id, name, name_ar) VALUES (%s, %s, %s, %s)",
                 (sid, grade_id, name, name_ar),
             )
+            self._apply_seo_to_row(conn, "subjects", sid, seo_data)
             conn.commit()
         return self.get_subject(sid)  # type: ignore[return-value]
 
     def get_subject(self, subject_id: str) -> dict[str, Any] | None:
         with self.pool.connection() as conn:
-            return self._normalize_row(conn.execute("SELECT * FROM subjects WHERE id=%s", (subject_id,)).fetchone())
+            row = self._normalize_row(conn.execute("SELECT * FROM subjects WHERE id=%s", (subject_id,)).fetchone())
+        return enrich_catalog_item(row, "subject") if row else None
 
     def list_subjects(self, *, grade_id: str | None = None, active_only: bool = True) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -350,7 +583,322 @@ class JobStore:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self.pool.connection() as conn:
             rows = conn.execute(f"SELECT * FROM subjects{where} ORDER BY name", params).fetchall()
-        return [self._normalize_row(r) for r in rows if r is not None]  # type: ignore[list-item]
+        return [
+            enrich_catalog_item(self._normalize_row(r), "subject")
+            for r in rows
+            if r is not None
+        ]  # type: ignore[list-item]
+
+    def update_country(
+        self,
+        country_id: str,
+        *,
+        name: str | None = None,
+        name_ar: str | None = None,
+        code: str | None = None,
+        seo: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        with self.pool.connection() as conn:
+            current = conn.execute(
+                "SELECT * FROM countries WHERE id=%s AND is_active=TRUE", (country_id,)
+            ).fetchone()
+            if not current:
+                return None
+            if name is None and name_ar is None and code is None and not seo:
+                return self.get_country(country_id)
+
+            new_name = name if name is not None else current["name"]
+            new_name_ar = name_ar if name_ar is not None else current.get("name_ar")
+            seo_data = self._merged_seo_row(current, name=name, name_ar=name_ar, seo_patch=seo)
+            self._validate_catalog_uniqueness(
+                conn,
+                "country",
+                name=new_name,
+                name_ar=new_name_ar,
+                slug_en=seo_data["slug_en"],
+                slug_ar=seo_data["slug_ar"],
+                parent_id=None,
+                exclude_id=country_id,
+            )
+            if code is not None and str(code).strip():
+                row = conn.execute(
+                    "SELECT id FROM countries WHERE is_active=TRUE AND LOWER(TRIM(code))=LOWER(TRIM(%s)) AND id<>%s",
+                    (code, country_id),
+                ).fetchone()
+                if row:
+                    raise CatalogDuplicateError("Country code already exists", field="code")
+
+            fields: list[str] = []
+            params: list[Any] = []
+            if name is not None:
+                fields.append("name=%s")
+                params.append(name)
+            if name_ar is not None:
+                fields.append("name_ar=%s")
+                params.append(name_ar)
+            if code is not None:
+                fields.append("code=%s")
+                params.append(code)
+            if seo or name is not None or name_ar is not None:
+                for key, value in seo_data.items():
+                    fields.append(f"{key}=%s")
+                    params.append(value)
+            params.append(country_id)
+            conn.execute(f"UPDATE countries SET {', '.join(fields)} WHERE id=%s AND is_active=TRUE", params)
+            conn.commit()
+        return self.get_country(country_id)
+
+    def deactivate_country(self, country_id: str) -> bool:
+        with self.pool.connection() as conn:
+            row = conn.execute("SELECT id, is_active FROM countries WHERE id=%s", (country_id,)).fetchone()
+            if not row:
+                return False
+            if not row["is_active"]:
+                return True
+            conn.execute("UPDATE countries SET is_active=FALSE WHERE id=%s", (country_id,))
+            conn.execute(
+                """UPDATE subjects SET is_active=FALSE WHERE grade_id IN (
+                       SELECT g.id FROM grades g
+                       JOIN education_systems es ON es.id = g.education_system_id
+                       WHERE es.country_id=%s)""",
+                (country_id,),
+            )
+            conn.execute(
+                """UPDATE grades SET is_active=FALSE WHERE education_system_id IN (
+                       SELECT id FROM education_systems WHERE country_id=%s)""",
+                (country_id,),
+            )
+            conn.execute("UPDATE education_systems SET is_active=FALSE WHERE country_id=%s", (country_id,))
+            conn.commit()
+        return True
+
+    def update_education_system(
+        self,
+        system_id: str,
+        *,
+        name: str | None = None,
+        name_ar: str | None = None,
+        seo: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        with self.pool.connection() as conn:
+            current = conn.execute(
+                "SELECT * FROM education_systems WHERE id=%s AND is_active=TRUE", (system_id,)
+            ).fetchone()
+            if not current:
+                return None
+            if name is None and name_ar is None and not seo:
+                return self.get_education_system(system_id)
+
+            new_name = name if name is not None else current["name"]
+            new_name_ar = name_ar if name_ar is not None else current.get("name_ar")
+            seo_data = self._merged_seo_row(current, name=name, name_ar=name_ar, seo_patch=seo)
+            self._validate_catalog_uniqueness(
+                conn,
+                "system",
+                name=new_name,
+                name_ar=new_name_ar,
+                slug_en=seo_data["slug_en"],
+                slug_ar=seo_data["slug_ar"],
+                parent_id=str(current["country_id"]),
+                exclude_id=system_id,
+            )
+
+            fields: list[str] = []
+            params: list[Any] = []
+            if name is not None:
+                fields.append("name=%s")
+                params.append(name)
+            if name_ar is not None:
+                fields.append("name_ar=%s")
+                params.append(name_ar)
+            if seo or name is not None or name_ar is not None:
+                for key, value in seo_data.items():
+                    fields.append(f"{key}=%s")
+                    params.append(value)
+            params.append(system_id)
+            conn.execute(
+                f"UPDATE education_systems SET {', '.join(fields)} WHERE id=%s AND is_active=TRUE", params
+            )
+            conn.commit()
+        return self.get_education_system(system_id)
+
+    def deactivate_education_system(self, system_id: str) -> bool:
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT id, is_active FROM education_systems WHERE id=%s", (system_id,)
+            ).fetchone()
+            if not row:
+                return False
+            if not row["is_active"]:
+                return True
+            conn.execute("UPDATE education_systems SET is_active=FALSE WHERE id=%s", (system_id,))
+            conn.execute(
+                """UPDATE subjects SET is_active=FALSE WHERE grade_id IN (
+                       SELECT id FROM grades WHERE education_system_id=%s)""",
+                (system_id,),
+            )
+            conn.execute("UPDATE grades SET is_active=FALSE WHERE education_system_id=%s", (system_id,))
+            conn.commit()
+        return True
+
+    def update_grade(
+        self,
+        grade_id: str,
+        *,
+        name: str | None = None,
+        name_ar: str | None = None,
+        sort_order: int | None = None,
+        seo: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        with self.pool.connection() as conn:
+            current = conn.execute(
+                "SELECT * FROM grades WHERE id=%s AND is_active=TRUE", (grade_id,)
+            ).fetchone()
+            if not current:
+                return None
+            if name is None and name_ar is None and sort_order is None and not seo:
+                return self.get_grade(grade_id)
+
+            new_name = name if name is not None else current["name"]
+            new_name_ar = name_ar if name_ar is not None else current.get("name_ar")
+            seo_data = self._merged_seo_row(current, name=name, name_ar=name_ar, seo_patch=seo)
+            self._validate_catalog_uniqueness(
+                conn,
+                "grade",
+                name=new_name,
+                name_ar=new_name_ar,
+                slug_en=seo_data["slug_en"],
+                slug_ar=seo_data["slug_ar"],
+                parent_id=str(current["education_system_id"]),
+                exclude_id=grade_id,
+            )
+
+            fields: list[str] = []
+            params: list[Any] = []
+            if name is not None:
+                fields.append("name=%s")
+                params.append(name)
+            if name_ar is not None:
+                fields.append("name_ar=%s")
+                params.append(name_ar)
+            if sort_order is not None:
+                fields.append("sort_order=%s")
+                params.append(sort_order)
+            if seo or name is not None or name_ar is not None:
+                for key, value in seo_data.items():
+                    fields.append(f"{key}=%s")
+                    params.append(value)
+            params.append(grade_id)
+            conn.execute(f"UPDATE grades SET {', '.join(fields)} WHERE id=%s AND is_active=TRUE", params)
+            conn.commit()
+        return self.get_grade(grade_id)
+
+    def deactivate_grade(self, grade_id: str) -> bool:
+        with self.pool.connection() as conn:
+            row = conn.execute("SELECT id, is_active FROM grades WHERE id=%s", (grade_id,)).fetchone()
+            if not row:
+                return False
+            if not row["is_active"]:
+                return True
+            conn.execute("UPDATE grades SET is_active=FALSE WHERE id=%s", (grade_id,))
+            conn.execute("UPDATE subjects SET is_active=FALSE WHERE grade_id=%s", (grade_id,))
+            conn.commit()
+        return True
+
+    def update_subject(
+        self,
+        subject_id: str,
+        *,
+        name: str | None = None,
+        name_ar: str | None = None,
+        seo: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        with self.pool.connection() as conn:
+            current = conn.execute(
+                "SELECT * FROM subjects WHERE id=%s AND is_active=TRUE", (subject_id,)
+            ).fetchone()
+            if not current:
+                return None
+            if name is None and name_ar is None and not seo:
+                return self.get_subject(subject_id)
+
+            new_name = name if name is not None else current["name"]
+            new_name_ar = name_ar if name_ar is not None else current.get("name_ar")
+            seo_data = self._merged_seo_row(current, name=name, name_ar=name_ar, seo_patch=seo)
+            self._validate_catalog_uniqueness(
+                conn,
+                "subject",
+                name=new_name,
+                name_ar=new_name_ar,
+                slug_en=seo_data["slug_en"],
+                slug_ar=seo_data["slug_ar"],
+                parent_id=str(current["grade_id"]),
+                exclude_id=subject_id,
+            )
+
+            fields: list[str] = []
+            params: list[Any] = []
+            if name is not None:
+                fields.append("name=%s")
+                params.append(name)
+            if name_ar is not None:
+                fields.append("name_ar=%s")
+                params.append(name_ar)
+            if seo or name is not None or name_ar is not None:
+                for key, value in seo_data.items():
+                    fields.append(f"{key}=%s")
+                    params.append(value)
+            params.append(subject_id)
+            conn.execute(f"UPDATE subjects SET {', '.join(fields)} WHERE id=%s AND is_active=TRUE", params)
+            conn.commit()
+        return self.get_subject(subject_id)
+
+    def get_catalog_hero_path(self, entity_type: str, entity_id: str) -> str | None:
+        table = ENTITY_TABLE.get(entity_type)
+        if not table:
+            return None
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT hero_image_path FROM {table} WHERE id=%s AND is_active=TRUE", (entity_id,)
+            ).fetchone()
+        if not row:
+            return None
+        return row.get("hero_image_path")
+
+    def set_catalog_hero_path(self, entity_type: str, entity_id: str, hero_path: str | None) -> dict[str, Any] | None:
+        table = ENTITY_TABLE.get(entity_type)
+        getters = {
+            "country": self.get_country,
+            "system": self.get_education_system,
+            "grade": self.get_grade,
+            "subject": self.get_subject,
+        }
+        getter = getters.get(entity_type)
+        if not table or not getter:
+            return None
+        with self.pool.connection() as conn:
+            conn.execute(
+                f"UPDATE {table} SET hero_image_path=%s WHERE id=%s AND is_active=TRUE",
+                (hero_path, entity_id),
+            )
+            conn.commit()
+        return getter(entity_id)
+
+    def count_books_for_subject(self, subject_id: str) -> int:
+        with self.pool.connection() as conn:
+            row = conn.execute("SELECT COUNT(*) AS c FROM books WHERE subject_id=%s", (subject_id,)).fetchone()
+            return int(row["c"]) if row else 0
+
+    def deactivate_subject(self, subject_id: str) -> bool:
+        with self.pool.connection() as conn:
+            row = conn.execute("SELECT id, is_active FROM subjects WHERE id=%s", (subject_id,)).fetchone()
+            if not row:
+                return False
+            if not row["is_active"]:
+                return True
+            conn.execute("UPDATE subjects SET is_active=FALSE WHERE id=%s", (subject_id,))
+            conn.commit()
+        return True
 
     def get_catalog_tree(self) -> list[dict[str, Any]]:
         with self.pool.connection() as conn:
@@ -381,10 +929,14 @@ class JobStore:
                             "SELECT * FROM subjects WHERE grade_id=%s AND is_active=TRUE ORDER BY name",
                             (g["id"],),
                         ).fetchall()
-                        g["subjects"] = [self._normalize_row(sub) for sub in subjects if sub]
-                        s["grades"].append(g)
-                    c["education_systems"].append(s)
-                tree.append(c)
+                        g["subjects"] = [
+                            enrich_catalog_item(self._normalize_row(sub), "subject")
+                            for sub in subjects
+                            if sub and self._normalize_row(sub)
+                        ]
+                        s["grades"].append(enrich_catalog_item(g, "grade"))
+                    c["education_systems"].append(enrich_catalog_item(s, "system"))
+                tree.append(enrich_catalog_item(c, "country"))
             return tree
 
     def get_subject_path(self, subject_id: str) -> dict[str, Any] | None:
@@ -483,6 +1035,21 @@ class JobStore:
             if book and book.get("subject_id"):
                 book["catalog_path"] = self.get_subject_path(book["subject_id"])
         return books  # type: ignore[return-value]
+
+    def delete_book(self, resource_id: str) -> dict[str, Any] | None:
+        book = self.get_book(resource_id)
+        if not book:
+            return None
+        with self.pool.connection() as conn:
+            job_rows = conn.execute(
+                "SELECT * FROM jobs WHERE book_resource_id=%s",
+                (resource_id,),
+            ).fetchall()
+            jobs = [self._normalize_row(r) for r in job_rows if r is not None]
+            conn.execute("DELETE FROM jobs WHERE book_resource_id=%s", (resource_id,))
+            conn.execute("DELETE FROM books WHERE resource_id=%s", (resource_id,))
+            conn.commit()
+        return {"book": book, "jobs": jobs}
 
     # --- Jobs (same interface as before) ---
 
@@ -620,7 +1187,13 @@ class JobStore:
                 (error[:2000], error, traceback_text, now, now, job_id),
             )
             conn.commit()
-        self.add_event(job_id, "failed", stage="failed", message=error[:1000])
+        self.add_event(
+            job_id,
+            "failed",
+            stage="failed",
+            message=error[:1000],
+            payload={"error": error, "traceback": traceback_text},
+        )
 
     def request_cancel(self, job_id: str) -> dict[str, Any] | None:
         job = self.get_job(job_id)

@@ -12,7 +12,7 @@ from .prompts import (
     visual_verify_prompt,
 )
 from .schemas import BookMetadata, ExtractedBlock, HierarchyContext, VisualAnalysis, VisualVerification
-from .vlm_client import OpenAICompatibleVLM
+from .vlm_client import OpenAICompatibleVLM, encode_image_for_vlm
 
 
 class UniversalVisualAnalyzer:
@@ -28,12 +28,8 @@ class UniversalVisualAnalyzer:
 
     @staticmethod
     def image_data_url(path: Path) -> str:
-        import base64
-
-        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-        suffix = path.suffix.lower()
-        mime = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
-        return f"data:{mime};base64,{b64}"
+        data_url, _ = encode_image_for_vlm(path)
+        return data_url
 
     def analyze(
         self,

@@ -89,3 +89,40 @@ def test_worker_completes_persisted_background_job(tmp_path, monkeypatch, pg_sto
     assert done["extracted_records"] == 2
     assert done["visual_assets"] == 1
     assert done["result"]["questions"] == 1
+
+
+def test_worker_records_readable_pipeline_failure(tmp_path, monkeypatch, pg_store):
+    class BoomPipeline:
+        def __init__(self, pdf_path, output_dir):
+            pass
+
+        def run(self, *args, **kwargs):
+            raise RuntimeError("Vision model returned empty content (finish_reason='stop')")
+
+    store = pg_store
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF")
+    resource_id = f"b-{uuid.uuid4().hex[:12]}"
+    store.create_book(resource_id, "book.pdf", str(pdf), pdf.stat().st_size, "hash", {"country": "Jordan"})
+    job_id = f"j-{uuid.uuid4().hex[:12]}"
+    store.create_job(
+        job_id=job_id,
+        book_resource_id=resource_id,
+        output_dir=str(tmp_path / "out"),
+        start_page=1,
+        end_page=None,
+        resume=True,
+        index_to_opensearch=False,
+        recreate_index=False,
+        metadata_overrides={},
+    )
+    job = store.claim_next_job()
+    monkeypatch.setattr(worker_module, "BookIngestionPipeline", BoomPipeline)
+    pool = worker_module.ExtractionWorkerPool(store, worker_count=1)
+    pool._run_job(job)
+    done = store.get_job(job_id)
+    assert done["status"] == "failed"
+    assert "empty content" in done["error"]
+    failed = [event for event in store.list_events(job_id) if event["event_type"] == "failed"][-1]
+    assert failed["payload"]["error"]
+    assert failed["payload"]["traceback"]

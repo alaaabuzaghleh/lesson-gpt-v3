@@ -100,7 +100,14 @@ export function JobsPage() {
                         {job.book_resource_id.slice(0, 10)}…
                       </Link>
                     </td>
-                    <td><StatusBadge status={job.status} /></td>
+                    <td>
+                      <StatusBadge status={job.status} />
+                      {job.status === 'failed' && (job.error || job.message) && (
+                        <div className="job-error-snippet" title={job.error || job.message || ''}>
+                          {job.error || job.message}
+                        </div>
+                      )}
+                    </td>
                     <td>{stageLabel(job.stage)}</td>
                     <td style={{ minWidth: 140 }}>
                       <ProgressBar value={job.progress} />

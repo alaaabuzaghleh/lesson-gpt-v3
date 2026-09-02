@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
   BookOpen,
   Briefcase,
@@ -27,10 +27,11 @@ function roleLabel(role: string | undefined) {
 
 export function Layout() {
   const { user, logout, isSuperAdmin } = useAuth()
+  const location = useLocation()
 
   const nav = [
     { to: '/', label: t.nav.dashboard, icon: LayoutDashboard, end: true },
-    { to: '/catalog', label: t.nav.catalog, icon: FolderTree },
+    { to: '/catalog/countries', label: t.nav.catalog, icon: FolderTree, end: false, match: '/catalog' },
     { to: '/books', label: t.nav.books, icon: BookOpen },
     { to: '/jobs', label: t.nav.jobs, icon: Briefcase },
     { to: '/search', label: t.nav.search, icon: Search },
@@ -55,17 +56,24 @@ export function Layout() {
         </div>
 
         <nav className="nav">
-          {nav.map(({ to, label, icon: Icon, end }) => (
+          {nav.map(({ to, label, icon: Icon, end, match }) => {
+            const isActive = match
+              ? location.pathname.startsWith(match)
+              : undefined
+            return (
             <NavLink
               key={to}
               to={to}
               end={end}
-              className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
+              className={({ isActive: linkActive }) =>
+                `nav-link${(isActive ?? linkActive) ? ' active' : ''}`
+              }
             >
               <Icon size={18} />
               {label}
             </NavLink>
-          ))}
+            )
+          })}
         </nav>
 
         <div className="sidebar-footer sidebar-user">

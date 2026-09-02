@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     vlm_timeout_seconds: int = 240
     vlm_max_tokens: int = 9000
     vlm_temperature: float = 0.0
+    vlm_image_max_side: int = 1280
+    vlm_num_ctx: int = 16384
 
     opensearch_url: str = "http://localhost:9200"
     opensearch_username: str = ""

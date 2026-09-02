@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { Play, ArrowRight } from 'lucide-react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Play, ArrowRight, Trash2 } from 'lucide-react'
 import { api } from '../api/client'
 import type { Book, ExtractionJob } from '../types/api'
 import {
@@ -8,6 +8,7 @@ import {
   JsonViewer,
   LoadingSpinner,
   StatusBadge,
+  TextField,
   formatBytes,
   formatDate,
 } from '../components/ui'
@@ -15,11 +16,13 @@ import { t } from '../i18n/ar'
 
 export function BookDetailPage() {
   const { resourceId } = useParams<{ resourceId: string }>()
+  const navigate = useNavigate()
   const [book, setBook] = useState<Book | null>(null)
   const [jobs, setJobs] = useState<ExtractionJob[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const [startPage, setStartPage] = useState(1)
   const [endPage, setEndPage] = useState('')
   const [indexToOs, setIndexToOs] = useState(true)
@@ -64,6 +67,20 @@ export function BookDetailPage() {
     }
   }
 
+  async function handleDelete() {
+    if (!book) return
+    if (!window.confirm(t.books.confirmDelete.replace('{name}', book.filename))) return
+    setDeleting(true)
+    setError(null)
+    try {
+      await api.deleteBook(book.resource_id)
+      navigate('/books')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t.books.deleteFailed)
+      setDeleting(false)
+    }
+  }
+
   if (loading) return <LoadingSpinner />
   if (!book) return <ErrorBanner message={t.bookDetail.notFound} />
 
@@ -76,6 +93,9 @@ export function BookDetailPage() {
           <h1>{book.filename}</h1>
           <p className="mono" dir="ltr">{book.resource_id}</p>
         </div>
+        <button type="button" className="btn btn-danger" onClick={() => void handleDelete()} disabled={deleting}>
+          <Trash2 size={16} /> {deleting ? t.books.deleting : t.books.delete}
+        </button>
       </header>
 
       {error && <ErrorBanner message={error} />}
@@ -95,20 +115,22 @@ export function BookDetailPage() {
         <section className="card">
           <h2><Play size={18} /> {t.bookDetail.startExtraction}</h2>
           <div className="form-stack">
-            <label>
-              {t.bookDetail.startPage}
-              <input type="number" min={1} value={startPage} onChange={(e) => setStartPage(+e.target.value)} />
-            </label>
-            <label>
-              {t.bookDetail.endPage}
-              <input
-                type="number"
-                min={1}
-                value={endPage}
-                onChange={(e) => setEndPage(e.target.value)}
-                placeholder={t.bookDetail.allPages}
-              />
-            </label>
+            <TextField
+              label={t.bookDetail.startPage}
+              type="number"
+              min={1}
+              value={startPage}
+              onChange={(e) => setStartPage(+e.target.value)}
+            />
+            <TextField
+              label={t.bookDetail.endPage}
+              type="number"
+              min={1}
+              value={endPage}
+              onChange={(e) => setEndPage(e.target.value)}
+              placeholder={t.bookDetail.allPages}
+              hint={t.bookDetail.endPageHint}
+            />
             <label className="checkbox-row">
               <input type="checkbox" checked={indexToOs} onChange={(e) => setIndexToOs(e.target.checked)} />
               {t.bookDetail.indexOpenSearch}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,6 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from ..config import settings
 from .auth_utils import ADMIN_ROLES, create_access_token, decode_access_token, verify_password
+from .catalog_seo import CATALOG_ENTITY_TYPES, CatalogDuplicateError, default_hero_file
 from .deps import require_admin, require_admin_sse, require_super_admin
 from .job_store import JobStore
 from .models import (
@@ -22,6 +24,7 @@ from .models import (
     CreateEducationSystemRequest,
     CreateGradeRequest,
     CreateSubjectRequest,
+    UpdateCatalogItemRequest,
     ExtractionJobRequest,
     LoginRequest,
     QuestionSearchRequest,
@@ -33,13 +36,46 @@ from .worker import ExtractionWorkerPool
 DATA_ROOT = Path(settings.api_data_root).resolve()
 BOOKS_ROOT = DATA_ROOT / "books"
 JOBS_ROOT = DATA_ROOT / "jobs"
+HERO_ROOT = DATA_ROOT / "catalog" / "heroes"
 BOOKS_ROOT.mkdir(parents=True, exist_ok=True)
 JOBS_ROOT.mkdir(parents=True, exist_ok=True)
+HERO_ROOT.mkdir(parents=True, exist_ok=True)
+
+ALLOWED_HERO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".svg"}
 
 store = JobStore(settings.database_url)
 workers = ExtractionWorkerPool(store)
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+
+
+def _catalog_entity_exists(entity_type: str, entity_id: str) -> bool:
+    getters = {
+        "country": store.get_country,
+        "system": store.get_education_system,
+        "grade": store.get_grade,
+        "subject": store.get_subject,
+    }
+    getter = getters.get(entity_type)
+    return bool(getter and getter(entity_id))
+
+
+def _hero_media_type(path: Path) -> str:
+    ext = path.suffix.lower()
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".svg": "image/svg+xml",
+    }.get(ext, "application/octet-stream")
+
+
+def _catalog_write(action):
+    try:
+        return action()
+    except CatalogDuplicateError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 def _public_book(book: dict[str, Any]) -> dict[str, Any]:
@@ -78,6 +114,7 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
         "indexed_records": job.get("indexed_records"),
         "result": result,
         "error": job.get("error"),
+        "traceback": job.get("traceback"),
         "retry_of": job.get("retry_of"),
         "created_at": job["created_at"],
         "started_at": job.get("started_at"),
@@ -220,14 +257,138 @@ def catalog_tree(_: Annotated[dict, Depends(require_admin)]):
     return {"items": store.get_catalog_tree()}
 
 
+@app.get("/api/v1/public/catalog/tree")
+def public_catalog_tree():
+    return {"items": store.get_catalog_tree()}
+
+
+@app.get("/api/v1/catalog/hero/{entity_type}/{entity_id}")
+def get_catalog_hero(entity_type: str, entity_id: str):
+    if entity_type not in CATALOG_ENTITY_TYPES:
+        raise HTTPException(404, "Unknown catalog entity type")
+    if not _catalog_entity_exists(entity_type, entity_id):
+        raise HTTPException(404, "Catalog item not found")
+    custom_path = store.get_catalog_hero_path(entity_type, entity_id)
+    if custom_path:
+        hero_file = Path(custom_path)
+        if hero_file.is_file():
+            return FileResponse(hero_file, media_type=_hero_media_type(hero_file))
+    default_file = default_hero_file(entity_type)
+    return FileResponse(default_file, media_type="image/svg+xml")
+
+
+@app.post("/api/v1/catalog/{entity_type}/{entity_id}/hero")
+async def upload_catalog_hero(
+    entity_type: str,
+    entity_id: str,
+    _: Annotated[dict, Depends(require_admin)],
+    file: UploadFile = File(...),
+):
+    if entity_type not in CATALOG_ENTITY_TYPES:
+        raise HTTPException(404, "Unknown catalog entity type")
+    if not _catalog_entity_exists(entity_type, entity_id):
+        raise HTTPException(404, "Catalog item not found")
+
+    filename = Path(file.filename or "hero.jpg").name
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED_HERO_EXTENSIONS:
+        raise HTTPException(415, "Hero image must be JPG, PNG, WebP, or SVG")
+
+    entity_dir = HERO_ROOT / entity_type
+    entity_dir.mkdir(parents=True, exist_ok=True)
+    destination = entity_dir / f"{entity_id}{ext}"
+
+    limit = 10 * 1024 * 1024
+    total = 0
+    try:
+        with destination.open("wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > limit:
+                    raise HTTPException(413, "Hero image exceeds 10 MB limit")
+                out.write(chunk)
+    except HTTPException:
+        destination.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(500, f"Failed to save hero image: {exc}") from exc
+
+    for other_ext in ALLOWED_HERO_EXTENSIONS:
+        if other_ext != ext:
+            (entity_dir / f"{entity_id}{other_ext}").unlink(missing_ok=True)
+
+    updated = store.set_catalog_hero_path(entity_type, entity_id, str(destination))
+    if not updated:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(404, "Catalog item not found")
+    return updated
+
+
+@app.delete("/api/v1/catalog/{entity_type}/{entity_id}/hero")
+def delete_catalog_hero(
+    entity_type: str,
+    entity_id: str,
+    _: Annotated[dict, Depends(require_admin)],
+):
+    if entity_type not in CATALOG_ENTITY_TYPES:
+        raise HTTPException(404, "Unknown catalog entity type")
+    custom_path = store.get_catalog_hero_path(entity_type, entity_id)
+    if custom_path:
+        Path(custom_path).unlink(missing_ok=True)
+    updated = store.set_catalog_hero_path(entity_type, entity_id, None)
+    if not updated:
+        raise HTTPException(404, "Catalog item not found")
+    return updated
+
+
 @app.get("/api/v1/catalog/countries")
 def list_countries(_: Annotated[dict, Depends(require_admin)]):
     return {"items": store.list_countries()}
 
 
+@app.get("/api/v1/catalog/countries/{country_id}")
+def get_country(country_id: str, _: Annotated[dict, Depends(require_admin)]):
+    country = store.get_country(country_id)
+    if not country:
+        raise HTTPException(404, "Country not found")
+    return country
+
+
 @app.post("/api/v1/catalog/countries", status_code=201)
 def create_country(body: CreateCountryRequest, _: Annotated[dict, Depends(require_admin)]):
-    return store.create_country(name=body.name, name_ar=body.name_ar, code=body.code)
+    return _catalog_write(
+        lambda: store.create_country(
+            name=body.name,
+            name_ar=body.name_ar,
+            code=body.code,
+            seo=body.seo_payload(),
+        )
+    )
+
+
+@app.patch("/api/v1/catalog/countries/{country_id}")
+def update_country(country_id: str, body: UpdateCatalogItemRequest, _: Annotated[dict, Depends(require_admin)]):
+    if not body.has_catalog_updates():
+        raise HTTPException(422, "No fields to update")
+    updated = _catalog_write(
+        lambda: store.update_country(
+            country_id,
+            name=body.name,
+            name_ar=body.name_ar,
+            code=body.code,
+            seo=body.seo_updates(),
+        )
+    )
+    if not updated:
+        raise HTTPException(404, "Country not found")
+    return updated
+
+
+@app.delete("/api/v1/catalog/countries/{country_id}", status_code=204)
+def delete_country(country_id: str, _: Annotated[dict, Depends(require_admin)]):
+    if not store.deactivate_country(country_id):
+        raise HTTPException(404, "Country not found")
 
 
 @app.get("/api/v1/catalog/education-systems")
@@ -238,11 +399,51 @@ def list_education_systems(
     return {"items": store.list_education_systems(country_id=country_id)}
 
 
+@app.get("/api/v1/catalog/education-systems/{system_id}")
+def get_education_system(system_id: str, _: Annotated[dict, Depends(require_admin)]):
+    system = store.get_education_system(system_id)
+    if not system:
+        raise HTTPException(404, "Education system not found")
+    return system
+
+
 @app.post("/api/v1/catalog/education-systems", status_code=201)
 def create_education_system(body: CreateEducationSystemRequest, _: Annotated[dict, Depends(require_admin)]):
     if not store.get_country(body.country_id):
         raise HTTPException(404, "Country not found")
-    return store.create_education_system(country_id=body.country_id, name=body.name, name_ar=body.name_ar)
+    return _catalog_write(
+        lambda: store.create_education_system(
+            country_id=body.country_id,
+            name=body.name,
+            name_ar=body.name_ar,
+            seo=body.seo_payload(),
+        )
+    )
+
+
+@app.patch("/api/v1/catalog/education-systems/{system_id}")
+def update_education_system(
+    system_id: str, body: UpdateCatalogItemRequest, _: Annotated[dict, Depends(require_admin)]
+):
+    if not body.has_catalog_updates():
+        raise HTTPException(422, "No fields to update")
+    updated = _catalog_write(
+        lambda: store.update_education_system(
+            system_id,
+            name=body.name,
+            name_ar=body.name_ar,
+            seo=body.seo_updates(),
+        )
+    )
+    if not updated:
+        raise HTTPException(404, "Education system not found")
+    return updated
+
+
+@app.delete("/api/v1/catalog/education-systems/{system_id}", status_code=204)
+def delete_education_system(system_id: str, _: Annotated[dict, Depends(require_admin)]):
+    if not store.deactivate_education_system(system_id):
+        raise HTTPException(404, "Education system not found")
 
 
 @app.get("/api/v1/catalog/grades")
@@ -253,16 +454,51 @@ def list_grades(
     return {"items": store.list_grades(education_system_id=education_system_id)}
 
 
+@app.get("/api/v1/catalog/grades/{grade_id}")
+def get_grade(grade_id: str, _: Annotated[dict, Depends(require_admin)]):
+    grade = store.get_grade(grade_id)
+    if not grade:
+        raise HTTPException(404, "Grade not found")
+    return grade
+
+
 @app.post("/api/v1/catalog/grades", status_code=201)
 def create_grade(body: CreateGradeRequest, _: Annotated[dict, Depends(require_admin)]):
     if not store.get_education_system(body.education_system_id):
         raise HTTPException(404, "Education system not found")
-    return store.create_grade(
-        education_system_id=body.education_system_id,
-        name=body.name,
-        name_ar=body.name_ar,
-        sort_order=body.sort_order,
+    return _catalog_write(
+        lambda: store.create_grade(
+            education_system_id=body.education_system_id,
+            name=body.name,
+            name_ar=body.name_ar,
+            sort_order=body.sort_order,
+            seo=body.seo_payload(),
+        )
     )
+
+
+@app.patch("/api/v1/catalog/grades/{grade_id}")
+def update_grade(grade_id: str, body: UpdateCatalogItemRequest, _: Annotated[dict, Depends(require_admin)]):
+    if not body.has_catalog_updates():
+        raise HTTPException(422, "No fields to update")
+    updated = _catalog_write(
+        lambda: store.update_grade(
+            grade_id,
+            name=body.name,
+            name_ar=body.name_ar,
+            sort_order=body.sort_order,
+            seo=body.seo_updates(),
+        )
+    )
+    if not updated:
+        raise HTTPException(404, "Grade not found")
+    return updated
+
+
+@app.delete("/api/v1/catalog/grades/{grade_id}", status_code=204)
+def delete_grade(grade_id: str, _: Annotated[dict, Depends(require_admin)]):
+    if not store.deactivate_grade(grade_id):
+        raise HTTPException(404, "Grade not found")
 
 
 @app.get("/api/v1/catalog/subjects")
@@ -270,11 +506,53 @@ def list_subjects(_: Annotated[dict, Depends(require_admin)], grade_id: str | No
     return {"items": store.list_subjects(grade_id=grade_id)}
 
 
+@app.get("/api/v1/catalog/subjects/{subject_id}")
+def get_subject(subject_id: str, _: Annotated[dict, Depends(require_admin)]):
+    subject = store.get_subject(subject_id)
+    if not subject:
+        raise HTTPException(404, "Subject not found")
+    return subject
+
+
 @app.post("/api/v1/catalog/subjects", status_code=201)
 def create_subject(body: CreateSubjectRequest, _: Annotated[dict, Depends(require_admin)]):
     if not store.get_grade(body.grade_id):
         raise HTTPException(404, "Grade not found")
-    return store.create_subject(grade_id=body.grade_id, name=body.name, name_ar=body.name_ar)
+    return _catalog_write(
+        lambda: store.create_subject(
+            grade_id=body.grade_id,
+            name=body.name,
+            name_ar=body.name_ar,
+            seo=body.seo_payload(),
+        )
+    )
+
+
+@app.patch("/api/v1/catalog/subjects/{subject_id}")
+def update_subject(subject_id: str, body: UpdateCatalogItemRequest, _: Annotated[dict, Depends(require_admin)]):
+    if not body.has_catalog_updates():
+        raise HTTPException(422, "No fields to update")
+    updated = _catalog_write(
+        lambda: store.update_subject(
+            subject_id,
+            name=body.name,
+            name_ar=body.name_ar,
+            seo=body.seo_updates(),
+        )
+    )
+    if not updated:
+        raise HTTPException(404, "Subject not found")
+    return updated
+
+
+@app.delete("/api/v1/catalog/subjects/{subject_id}")
+def delete_subject(subject_id: str, _: Annotated[dict, Depends(require_admin)]):
+    if not store.get_subject(subject_id):
+        raise HTTPException(404, "Subject not found")
+    book_count = store.count_books_for_subject(subject_id)
+    if not store.deactivate_subject(subject_id):
+        raise HTTPException(404, "Subject not found")
+    return {"deleted": True, "linked_books": book_count}
 
 
 # --- Books ---
@@ -363,6 +641,34 @@ def get_book(resource_id: str, _: Annotated[dict, Depends(require_admin)]):
     if not book:
         raise HTTPException(404, "Book not found")
     return _public_book(book)
+
+
+@app.delete("/api/v1/books/{resource_id}")
+def delete_book(resource_id: str, _: Annotated[dict, Depends(require_admin)]):
+    result = store.delete_book(resource_id)
+    if not result:
+        raise HTTPException(404, "Book not found")
+    book = result["book"]
+    jobs = result["jobs"]
+    stored = Path(str(book.get("stored_path") or BOOKS_ROOT / resource_id / "source.pdf"))
+    shutil.rmtree(stored.parent, ignore_errors=True)
+    for job in jobs:
+        output_dir = job.get("output_dir")
+        if output_dir:
+            shutil.rmtree(output_dir, ignore_errors=True)
+    book_ids = [job.get("book_id") for job in jobs if job.get("book_id")]
+    if book_ids:
+        try:
+            from ..opensearch_index import create_client
+
+            create_client().delete_by_query(
+                index=settings.opensearch_index,
+                body={"query": {"terms": {"book_id": book_ids}}},
+                refresh=True,
+            )
+        except Exception:
+            pass
+    return {"deleted": True, "deleted_jobs": len(jobs)}
 
 
 @app.post("/api/v1/books/{resource_id}/extraction-jobs", status_code=202)
@@ -507,16 +813,23 @@ def job_errors(job_id: str, _: Annotated[dict, Depends(require_admin)]):
     job = store.get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
+    items: list[dict[str, Any]] = []
+    if job.get("error"):
+        items.append({
+            "source": "job",
+            "stage": job.get("stage") or "failed",
+            "error": job["error"],
+            "message": job.get("message"),
+            "traceback": job.get("traceback"),
+        })
     path = Path(job["output_dir"]) / "errors.jsonl"
-    if not path.exists():
-        return {"items": []}
-    items = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            try:
-                items.append(json.loads(line))
-            except Exception:
-                items.append({"raw": line})
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                try:
+                    items.append(json.loads(line))
+                except Exception:
+                    items.append({"raw": line})
     return {"items": items}
 
 

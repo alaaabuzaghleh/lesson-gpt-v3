@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import Enum
 from typing import Any, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ContentType(str, Enum):
@@ -80,6 +80,65 @@ class ContentType(str, Enum):
     GLOSSARY = "glossary"
     INDEX = "index"
     OTHER = "other"
+
+
+CONTENT_TYPE_ALIASES = {
+    "title": "section_heading",
+    "heading": "section_heading",
+    "header": "section_heading",
+    "headline": "section_heading",
+    "subheading": "section_heading",
+    "subtitle": "section_heading",
+    "page_title": "lesson_title",
+    "lesson": "lesson_title",
+    "chapter": "chapter_title",
+    "unit": "unit_title",
+    "paragraph": "explanation",
+    "text": "explanation",
+    "body": "explanation",
+    "body_text": "explanation",
+    "content": "explanation",
+    "callout": "note",
+    "sidebar": "note",
+    "box": "note",
+    "highlight": "note",
+    "quote": "source_text",
+    "photo": "image",
+    "picture": "image",
+    "illustration": "figure",
+    "drawing": "figure",
+    "math": "formula",
+    "objective": "learning_objective",
+    "objectives": "learning_objective",
+    "term": "key_term",
+    "toc": "table_of_contents",
+    "contents": "table_of_contents",
+    "quiz": "question",
+    "homework": "exercise",
+    "solution": "answer",
+    "solutions": "answer_key",
+    "list": "explanation",
+    "bullet": "explanation",
+    "bullets": "explanation",
+}
+
+
+def coerce_content_type(value: Any) -> ContentType:
+    if isinstance(value, ContentType):
+        return value
+    if value is None or str(value).strip() == "":
+        return ContentType.OTHER
+    raw = str(value).strip().casefold().replace("-", "_").replace(" ", "_")
+    for item in ContentType:
+        if raw == item.value or raw == item.name.casefold():
+            return item
+    alias = CONTENT_TYPE_ALIASES.get(raw)
+    if alias:
+        return ContentType(alias)
+    for item in ContentType:
+        if raw.endswith("_" + item.value) or item.value in raw:
+            return item
+    return ContentType.OTHER
 
 
 VISUAL_TYPES = {
@@ -363,6 +422,23 @@ class ExtractedBlock(BaseModel):
     cross_references: list[str] = Field(default_factory=list)
 
     confidence: float = Field(default=0.8, ge=0, le=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _keep_unknown_content_type(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("content_type")
+        if isinstance(raw, str) and raw.strip():
+            allowed = {item.value for item in ContentType}
+            if raw.strip().casefold().replace("-", "_").replace(" ", "_") not in allowed and not data.get("subtype"):
+                data["subtype"] = raw.strip()
+        return data
+
+    @field_validator("content_type", mode="before")
+    @classmethod
+    def _coerce_content_type(cls, value: Any) -> ContentType:
+        return coerce_content_type(value)
 
 
 class PageExtraction(BaseModel):
