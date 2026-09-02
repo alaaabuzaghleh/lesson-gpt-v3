@@ -9,6 +9,7 @@ import orjson
 from rich.console import Console
 from rich.progress import Progress
 
+from .checkpoint import JobCheckpoint, checkpoint_path
 from .config import settings
 from .hierarchy import HierarchyResolver
 from .normalizer import build_search_text, normalize_general
@@ -24,11 +25,12 @@ console = Console()
 
 
 class JobCancelled(RuntimeError):
-    """Raised when an external caller requests cooperative cancellation."""
+    """Raised when an external caller requests cooperative stop/pause."""
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 CancelCheck = Callable[[], bool]
+PageDocsCallback = Callable[[int, list[IndexDocument]], None]
 
 
 def stable_book_id(pdf_path: Path, meta: BookMetadata) -> str:
@@ -347,6 +349,196 @@ class BookIngestionPipeline:
             for key, value in qfields.items():
                 setattr(d, key, value)
 
+    def _page_extraction_path(self, page_no: int) -> Path:
+        return self.extracted_dir / f"page_{page_no:04d}.json"
+
+    def _load_page_extraction(self, page_no: int) -> PageExtraction | None:
+        path = self._page_extraction_path(page_no)
+        if not path.exists():
+            return None
+        try:
+            return PageExtraction.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _load_jsonl_documents(self, path: Path) -> list[IndexDocument]:
+        docs: list[IndexDocument] = []
+        if not path.exists():
+            return docs
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                docs.append(IndexDocument.model_validate_json(line))
+            except Exception:
+                continue
+        return docs
+
+    def _append_jsonl(self, path: Path, docs: list[IndexDocument]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            for doc in docs:
+                f.write(doc.model_dump_json() + "\n")
+
+    def _persist_checkpoint(self, checkpoint: JobCheckpoint) -> dict[str, Any]:
+        return checkpoint.save(checkpoint_path(self.output_dir))
+
+    def _build_page_documents(
+        self,
+        metadata: BookMetadata,
+        book_id: str,
+        page_ex: PageExtraction,
+        hierarchy,
+        resume: bool = True,
+        cancel_check: CancelCheck | None = None,
+    ) -> list[IndexDocument]:
+        docs: list[IndexDocument] = []
+        if cancel_check and cancel_check():
+            raise JobCancelled("Extraction job was stopped")
+        page_data = self.reader.render_page(page_ex.pdf_page_number)
+        hierarchy_path = [
+            x
+            for x in [
+                hierarchy.unit_title,
+                hierarchy.chapter_title,
+                hierarchy.lesson_title,
+                hierarchy.section_title,
+            ]
+            if x
+        ]
+
+        for block in page_ex.blocks:
+            if cancel_check and cancel_check():
+                raise JobCancelled("Extraction job was stopped")
+            if block.question:
+                self._assign_question_ids(block.question, book_id, page_ex.pdf_page_number, block.sequence)
+
+            asset_path: Path | None = None
+            asset_id: str | None = None
+            visual: VisualAnalysis | None = None
+
+            if block.content_type in VISUAL_TYPES and block.bbox:
+                asset_id = stable_asset_id(book_id, page_ex.pdf_page_number, block.sequence)
+                asset_path = self.crop_visual(page_data, block, book_id)
+                if settings.deep_visual_analysis and asset_path is not None:
+                    context = self._context_for_asset(page_ex.pdf_page_number, page_ex, block.sequence)
+                    try:
+                        visual = self.visual_analyzer.analyze(
+                            asset_id=asset_id,
+                            crop_path=asset_path,
+                            page=page_data,
+                            printed_page_number=page_ex.printed_page_number,
+                            block=block,
+                            metadata=metadata,
+                            hierarchy=hierarchy,
+                            context=context,
+                            resume=resume,
+                        )
+                    except Exception as exc:
+                        page_ex.extraction_notes.append(f"visual_analysis_failed:{asset_id}:{exc!r}")
+                        console.print(f"[yellow]Visual analysis failed for {asset_id}: {exc}[/yellow]")
+
+            visual_type, visual_subtype, visual_summary, visual_text, visual_labels, visual_concepts, verification_status = self._visual_search_fields(visual)
+            text = block.verbatim_text or ""
+            normalized = normalize_general(text)
+            search_text = build_search_text(
+                metadata.title,
+                metadata.subject,
+                metadata.grade,
+                hierarchy_path,
+                block.title,
+                text,
+                block.concise_description,
+                block.concepts,
+                block.keywords,
+                block.aliases,
+                block.caption,
+                block.figure_label,
+                visual_type,
+                visual_subtype,
+                visual_summary,
+                visual_text,
+                visual_labels,
+                visual_concepts,
+                block.question.group_title if block.question else None,
+                block.question.scope if block.question else None,
+                block.question.format if block.question else None,
+                block.question.purpose if block.question else None,
+                block.question.bloom_level if block.question else None,
+                [r.reference_text for r in block.question.references if r.reference_text] if block.question else [],
+            )
+            ctype = block.content_type.value
+            doc_id = stable_block_id(book_id, page_ex.pdf_page_number, block.sequence, text, ctype)
+            quality = block_quality_score(block, visual)
+            qfields = self._question_fields(block.question)
+
+            docs.append(
+                IndexDocument(
+                    id=doc_id,
+                    book_id=book_id,
+                    book_title=metadata.title or self.pdf_path.stem,
+                    country=metadata.country,
+                    curriculum=metadata.curriculum,
+                    education_system=metadata.education_system,
+                    grade=metadata.grade,
+                    subject=metadata.subject,
+                    semester=metadata.semester,
+                    academic_year=metadata.academic_year,
+                    language=block.language or page_ex.page_language or metadata.language,
+                    pdf_page_number=page_ex.pdf_page_number,
+                    printed_page_number=page_ex.printed_page_number,
+                    unit_title=hierarchy.unit_title,
+                    chapter_title=hierarchy.chapter_title,
+                    lesson_title=hierarchy.lesson_title,
+                    section_title=hierarchy.section_title,
+                    hierarchy_path=hierarchy_path,
+                    sequence=block.sequence,
+                    content_type=ctype,
+                    subtype=block.subtype,
+                    title=block.title,
+                    text=text,
+                    normalized_text=normalized,
+                    search_text=search_text,
+                    concepts=block.concepts,
+                    keywords=block.keywords,
+                    aliases=block.aliases,
+                    skills=block.skills,
+                    prerequisites=block.prerequisites,
+                    difficulty=block.difficulty,
+                    bloom_level=block.bloom_level,
+                    importance=block.importance,
+                    question=block.question.model_dump(mode="json") if block.question else None,
+                    **qfields,
+                    graph=block.graph.model_dump() if block.graph else None,
+                    table=block.table.model_dump() if block.table else None,
+                    figure_label=block.figure_label,
+                    caption=block.caption,
+                    cross_references=block.cross_references,
+                    asset_id=asset_id,
+                    visual_type=visual_type,
+                    visual_subtype=visual_subtype,
+                    visual_summary=visual_summary,
+                    visual_text=visual_text,
+                    visual_labels=visual_labels,
+                    visual_concepts=visual_concepts,
+                    visual_verification_status=verification_status,
+                    visual_analysis=visual.model_dump(mode="json") if visual else None,
+                    bbox=block.bbox.model_dump() if block.bbox else None,
+                    asset_path=str(asset_path) if asset_path else None,
+                    page_image_path=str(page_data.image_path),
+                    source_pdf_path=str(self.pdf_path),
+                    confidence=block.confidence,
+                    quality_score=quality,
+                    extraction_notes=page_ex.extraction_notes,
+                )
+            )
+            if block.question and block.question.children:
+                docs.extend(self._expand_subquestions(docs[-1], block.question))
+
+        self._link_question_references(docs)
+        return docs
+
     def build_documents(
         self,
         metadata: BookMetadata,
@@ -363,147 +555,18 @@ class BookIngestionPipeline:
 
         for page_idx, page_ex in enumerate(ordered_pages, start=1):
             if cancel_check and cancel_check():
-                raise JobCancelled("Extraction job was cancelled")
+                raise JobCancelled("Extraction job was stopped")
             hierarchy = resolver.apply_page(page_ex)
-            page_data = self.reader.render_page(page_ex.pdf_page_number)
-            hierarchy_path = [
-                x
-                for x in [
-                    hierarchy.unit_title,
-                    hierarchy.chapter_title,
-                    hierarchy.lesson_title,
-                    hierarchy.section_title,
-                ]
-                if x
-            ]
-
-            for block in page_ex.blocks:
-                if cancel_check and cancel_check():
-                    raise JobCancelled("Extraction job was cancelled")
-                if block.question:
-                    self._assign_question_ids(block.question, book_id, page_ex.pdf_page_number, block.sequence)
-
-                asset_path: Path | None = None
-                asset_id: str | None = None
-                visual: VisualAnalysis | None = None
-
-                if block.content_type in VISUAL_TYPES and block.bbox:
-                    asset_id = stable_asset_id(book_id, page_ex.pdf_page_number, block.sequence)
-                    asset_path = self.crop_visual(page_data, block, book_id)
-                    if settings.deep_visual_analysis and asset_path is not None:
-                        context = self._context_for_asset(page_ex.pdf_page_number, page_ex, block.sequence)
-                        try:
-                            visual = self.visual_analyzer.analyze(
-                                asset_id=asset_id,
-                                crop_path=asset_path,
-                                page=page_data,
-                                printed_page_number=page_ex.printed_page_number,
-                                block=block,
-                                metadata=metadata,
-                                hierarchy=hierarchy,
-                                context=context,
-                                resume=resume,
-                            )
-                        except Exception as exc:
-                            page_ex.extraction_notes.append(f"visual_analysis_failed:{asset_id}:{exc!r}")
-                            console.print(f"[yellow]Visual analysis failed for {asset_id}: {exc}[/yellow]")
-
-                visual_type, visual_subtype, visual_summary, visual_text, visual_labels, visual_concepts, verification_status = self._visual_search_fields(visual)
-                text = block.verbatim_text or ""
-                normalized = normalize_general(text)
-                search_text = build_search_text(
-                    metadata.title,
-                    metadata.subject,
-                    metadata.grade,
-                    hierarchy_path,
-                    block.title,
-                    text,
-                    block.concise_description,
-                    block.concepts,
-                    block.keywords,
-                    block.aliases,
-                    block.caption,
-                    block.figure_label,
-                    visual_type,
-                    visual_subtype,
-                    visual_summary,
-                    visual_text,
-                    visual_labels,
-                    visual_concepts,
-                    block.question.group_title if block.question else None,
-                    block.question.scope if block.question else None,
-                    block.question.format if block.question else None,
-                    block.question.purpose if block.question else None,
-                    block.question.bloom_level if block.question else None,
-                    [r.reference_text for r in block.question.references if r.reference_text] if block.question else [],
+            docs.extend(
+                self._build_page_documents(
+                    metadata,
+                    book_id,
+                    page_ex,
+                    hierarchy,
+                    resume=resume,
+                    cancel_check=cancel_check,
                 )
-                ctype = block.content_type.value
-                doc_id = stable_block_id(book_id, page_ex.pdf_page_number, block.sequence, text, ctype)
-                quality = block_quality_score(block, visual)
-                qfields = self._question_fields(block.question)
-
-                docs.append(
-                    IndexDocument(
-                        id=doc_id,
-                        book_id=book_id,
-                        book_title=metadata.title or self.pdf_path.stem,
-                        country=metadata.country,
-                        curriculum=metadata.curriculum,
-                        education_system=metadata.education_system,
-                        grade=metadata.grade,
-                        subject=metadata.subject,
-                        semester=metadata.semester,
-                        academic_year=metadata.academic_year,
-                        language=block.language or page_ex.page_language or metadata.language,
-                        pdf_page_number=page_ex.pdf_page_number,
-                        printed_page_number=page_ex.printed_page_number,
-                        unit_title=hierarchy.unit_title,
-                        chapter_title=hierarchy.chapter_title,
-                        lesson_title=hierarchy.lesson_title,
-                        section_title=hierarchy.section_title,
-                        hierarchy_path=hierarchy_path,
-                        sequence=block.sequence,
-                        content_type=ctype,
-                        subtype=block.subtype,
-                        title=block.title,
-                        text=text,
-                        normalized_text=normalized,
-                        search_text=search_text,
-                        concepts=block.concepts,
-                        keywords=block.keywords,
-                        aliases=block.aliases,
-                        skills=block.skills,
-                        prerequisites=block.prerequisites,
-                        difficulty=block.difficulty,
-                        bloom_level=block.bloom_level,
-                        importance=block.importance,
-                        question=block.question.model_dump(mode="json") if block.question else None,
-                        **qfields,
-                        graph=block.graph.model_dump() if block.graph else None,
-                        table=block.table.model_dump() if block.table else None,
-                        figure_label=block.figure_label,
-                        caption=block.caption,
-                        cross_references=block.cross_references,
-                        asset_id=asset_id,
-                        visual_type=visual_type,
-                        visual_subtype=visual_subtype,
-                        visual_summary=visual_summary,
-                        visual_text=visual_text,
-                        visual_labels=visual_labels,
-                        visual_concepts=visual_concepts,
-                        visual_verification_status=verification_status,
-                        visual_analysis=visual.model_dump(mode="json") if visual else None,
-                        bbox=block.bbox.model_dump() if block.bbox else None,
-                        asset_path=str(asset_path) if asset_path else None,
-                        page_image_path=str(page_data.image_path),
-                        source_pdf_path=str(self.pdf_path),
-                        confidence=block.confidence,
-                        quality_score=quality,
-                        extraction_notes=page_ex.extraction_notes,
-                    )
-                )
-                if block.question and block.question.children:
-                    docs.extend(self._expand_subquestions(docs[-1], block.question))
+            )
 
             if progress_callback:
                 progress_callback({
@@ -517,108 +580,17 @@ class BookIngestionPipeline:
         self._link_question_references(docs)
         return docs
 
-    def run(
+    def _write_run_artifacts(
         self,
-        overrides: dict[str, Any],
-        start_page: int = 1,
-        end_page: int | None = None,
-        resume: bool = True,
-        progress_callback: ProgressCallback | None = None,
-        cancel_check: CancelCheck | None = None,
-    ) -> tuple[BookMetadata, str, list[IndexDocument]]:
-        def emit(stage: str, progress: float, message: str, current_page: int | None = None, total_pages: int | None = None) -> None:
-            if progress_callback:
-                progress_callback({
-                    "stage": stage,
-                    "progress": round(float(progress), 2),
-                    "message": message,
-                    "current_page": current_page,
-                    "total_pages": total_pages,
-                })
-
-        def check_cancel() -> None:
-            if cancel_check and cancel_check():
-                raise JobCancelled("Extraction job was cancelled")
-
-        check_cancel()
-        emit("metadata", 1.0, "Detecting textbook metadata")
-        try:
-            detected = self.detect_metadata()
-        except JobCancelled:
-            raise
-        except Exception as exc:
-            fallback = {
-                "stage": "metadata_detection",
-                "error": str(exc),
-                "fallback": "catalog_and_filename",
-            }
-            with (self.output_dir / "errors.jsonl").open("a", encoding="utf-8") as f:
-                f.write(json.dumps(fallback, ensure_ascii=False) + "\n")
-            console.print(
-                f"[yellow]Metadata detection failed ({exc}); continuing with catalog metadata[/yellow]"
-            )
-            emit("metadata", 3.0, "Vision metadata failed; using catalog data")
-            detected = BookMetadata(title=self.pdf_path.stem, confidence=0.2)
-        metadata = merge_metadata(detected, overrides)
-        book_id = stable_book_id(self.pdf_path, metadata)
-        (self.output_dir / "book_metadata.final.json").write_text(
-            metadata.model_dump_json(indent=2), encoding="utf-8"
-        )
-        emit("metadata", 5.0, "Metadata detected", total_pages=self.reader.page_count)
-        check_cancel()
-
-        if start_page > self.reader.page_count:
-            raise ValueError(f"start_page {start_page} exceeds PDF page count {self.reader.page_count}")
-        end_page = min(end_page or self.reader.page_count, self.reader.page_count)
-        if end_page < start_page:
-            raise ValueError("end_page must be greater than or equal to start_page")
-        extractions: list[PageExtraction] = []
-        requested_pages = max(1, end_page - start_page + 1)
-        for ordinal, page_no in enumerate(range(start_page, end_page + 1), start=1):
-            check_cancel()
-            page = self.reader.render_page(page_no)
-            try:
-                extractions.append(self.extract_page(page, metadata, resume=resume))
-            except Exception as exc:
-                error = {"pdf_page_number": page_no, "stage": "page_extraction", "error": repr(exc)}
-                with (self.output_dir / "errors.jsonl").open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(error, ensure_ascii=False) + "\n")
-                console.print(f"[red]Page {page_no} failed: {exc}[/red]")
-            emit(
-                "page_extraction",
-                5.0 + (55.0 * ordinal / requested_pages),
-                f"Extracted page {page_no} of {end_page}",
-                current_page=page_no,
-                total_pages=requested_pages,
-            )
-
-        check_cancel()
-        emit("question_intelligence", 62.0, "Classifying questions and pedagogical scope")
-        console.print("[cyan]Classifying textbook questions and pedagogical scope...[/cyan]")
-        extractions = self.question_intelligence.enrich_pages(extractions)
-        for enriched in extractions:
-            (self.extracted_dir / f"page_{enriched.pdf_page_number:04d}.json").write_text(
-                enriched.model_dump_json(indent=2), encoding="utf-8"
-            )
-
-        check_cancel()
-        emit("visual_analysis", 65.0, "Building records and deeply analyzing visual assets")
-        console.print("[cyan]Building structured records and deeply analyzing visual assets...[/cyan]")
-        docs = self.build_documents(
-            metadata,
-            book_id,
-            extractions,
-            resume=resume,
-            progress_callback=progress_callback,
-            cancel_check=cancel_check,
-        )
-        check_cancel()
-        emit("artifact_generation", 91.0, "Writing extraction artifacts")
-        jsonl_path = self.index_dir / "documents.jsonl"
-        with jsonl_path.open("w", encoding="utf-8") as f:
-            for doc in docs:
-                f.write(doc.model_dump_json() + "\n")
-
+        *,
+        book_id: str,
+        metadata: BookMetadata,
+        extractions: list[PageExtraction],
+        docs: list[IndexDocument],
+        start_page: int,
+        end_page: int,
+        jsonl_path: Path,
+    ) -> None:
         content_type_counts: dict[str, int] = {}
         visual_type_counts: dict[str, int] = {}
         verification_counts: dict[str, int] = {}
@@ -631,7 +603,9 @@ class BookIngestionPipeline:
             if doc.visual_type:
                 visual_type_counts[doc.visual_type] = visual_type_counts.get(doc.visual_type, 0) + 1
             if doc.visual_verification_status:
-                verification_counts[doc.visual_verification_status] = verification_counts.get(doc.visual_verification_status, 0) + 1
+                verification_counts[doc.visual_verification_status] = verification_counts.get(
+                    doc.visual_verification_status, 0
+                ) + 1
             if doc.question_scope:
                 question_scope_counts[doc.question_scope] = question_scope_counts.get(doc.question_scope, 0) + 1
             if doc.question_format:
@@ -639,7 +613,9 @@ class BookIngestionPipeline:
             if doc.question_purpose:
                 question_purpose_counts[doc.question_purpose] = question_purpose_counts.get(doc.question_purpose, 0) + 1
             if doc.question_bloom_level:
-                question_bloom_counts[doc.question_bloom_level] = question_bloom_counts.get(doc.question_bloom_level, 0) + 1
+                question_bloom_counts[doc.question_bloom_level] = question_bloom_counts.get(
+                    doc.question_bloom_level, 0
+                ) + 1
 
         processed_page_numbers = {p.pdf_page_number for p in extractions}
         empty_pages = [p.pdf_page_number for p in extractions if not p.blocks]
@@ -660,13 +636,12 @@ class BookIngestionPipeline:
             if d.asset_id and settings.verify_visual_analysis and d.visual_verification_status != "passed"
         ]
         visual_docs = [d for d in docs if d.asset_id]
-
-        emit("quality_report", 93.0, "Generating quality report")
+        requested = max(1, end_page - start_page + 1)
         quality_report = {
             "book_id": book_id,
             "source_page_count": self.reader.page_count,
             "processed_pages": len(processed_page_numbers),
-            "processing_coverage": round(len(processed_page_numbers) / max(1, end_page - start_page + 1), 4),
+            "processing_coverage": round(len(processed_page_numbers) / requested, 4),
             "empty_extracted_pages": empty_pages,
             "low_confidence_blocks_count": len(low_confidence),
             "low_confidence_blocks": low_confidence[:500],
@@ -696,7 +671,6 @@ class BookIngestionPipeline:
         (self.output_dir / "quality_report.json").write_text(
             json.dumps(quality_report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-
         structure = {
             "book_id": book_id,
             "units": sorted({d.unit_title for d in docs if d.unit_title}),
@@ -713,13 +687,19 @@ class BookIngestionPipeline:
                     "section": p.explicit_section_title,
                 }
                 for p in sorted(extractions, key=lambda x: x.pdf_page_number)
-                if any([p.explicit_unit_title, p.explicit_chapter_title, p.explicit_lesson_title, p.explicit_section_title])
+                if any(
+                    [
+                        p.explicit_unit_title,
+                        p.explicit_chapter_title,
+                        p.explicit_lesson_title,
+                        p.explicit_section_title,
+                    ]
+                )
             ],
         }
         (self.output_dir / "structure.json").write_text(
             json.dumps(structure, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-
         manifest = {
             "schema_version": 3,
             "book_id": book_id,
@@ -732,9 +712,265 @@ class BookIngestionPipeline:
             "documents_jsonl": str(jsonl_path),
             "quality_report": str(self.output_dir / "quality_report.json"),
             "structure": str(self.output_dir / "structure.json"),
+            "checkpoint": str(checkpoint_path(self.output_dir)),
         }
         (self.output_dir / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        emit("extraction_complete", 95.0, "Extraction complete; ready for indexing")
+
+    def run(
+        self,
+        overrides: dict[str, Any],
+        start_page: int = 1,
+        end_page: int | None = None,
+        resume: bool = True,
+        progress_callback: ProgressCallback | None = None,
+        cancel_check: CancelCheck | None = None,
+        page_docs_callback: PageDocsCallback | None = None,
+    ) -> tuple[BookMetadata, str, list[IndexDocument]]:
+        jsonl_path = self.index_dir / "documents.jsonl"
+        ckpt_file = checkpoint_path(self.output_dir)
+        checkpoint = JobCheckpoint.load_or_new(ckpt_file) if resume else JobCheckpoint()
+        if resume:
+            checkpoint.hydrate_from_artifacts(self.extracted_dir, jsonl_path)
+        elif jsonl_path.exists():
+            jsonl_path.unlink()
+
+        def emit(
+            stage: str,
+            progress: float,
+            message: str,
+            current_page: int | None = None,
+            total_pages: int | None = None,
+        ) -> None:
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": stage,
+                        "progress": round(float(progress), 2),
+                        "message": message,
+                        "current_page": current_page,
+                        "total_pages": total_pages,
+                        "checkpoint": checkpoint.to_dict(),
+                    }
+                )
+
+        def persist(stage: str, current_page: int | None = None) -> dict[str, Any]:
+            checkpoint.stage = stage
+            if current_page is not None:
+                checkpoint.current_page = current_page
+            return self._persist_checkpoint(checkpoint)
+
+        def check_cancel() -> None:
+            if cancel_check and cancel_check():
+                persist(checkpoint.stage or "paused", checkpoint.current_page)
+                raise JobCancelled("Extraction job was stopped")
+
+        check_cancel()
+        meta_path = self.output_dir / "book_metadata.final.json"
+        detected: BookMetadata | None = None
+        if resume and meta_path.exists():
+            try:
+                detected = BookMetadata.model_validate_json(meta_path.read_text(encoding="utf-8"))
+                emit("metadata", 4.0, "Resuming with saved metadata")
+            except Exception:
+                detected = None
+
+        if detected is None:
+            emit("metadata", 1.0, "Detecting textbook metadata")
+            try:
+                detected = self.detect_metadata()
+            except JobCancelled:
+                raise
+            except Exception as exc:
+                fallback = {
+                    "stage": "metadata_detection",
+                    "error": str(exc),
+                    "fallback": "catalog_and_filename",
+                }
+                with (self.output_dir / "errors.jsonl").open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(fallback, ensure_ascii=False) + "\n")
+                console.print(
+                    f"[yellow]Metadata detection failed ({exc}); continuing with catalog metadata[/yellow]"
+                )
+                emit("metadata", 3.0, "Vision metadata failed; using catalog data")
+                detected = BookMetadata(title=self.pdf_path.stem, confidence=0.2)
+
+        metadata = merge_metadata(detected, overrides)
+        book_id = checkpoint.book_id or stable_book_id(self.pdf_path, metadata)
+        checkpoint.book_id = book_id
+        checkpoint.metadata = metadata.model_dump()
+        meta_path.write_text(metadata.model_dump_json(indent=2), encoding="utf-8")
+        persist("metadata")
+        emit("metadata", 5.0, "Metadata detected", total_pages=self.reader.page_count)
+        check_cancel()
+
+        if start_page > self.reader.page_count:
+            raise ValueError(f"start_page {start_page} exceeds PDF page count {self.reader.page_count}")
+        end_page = min(end_page or self.reader.page_count, self.reader.page_count)
+        if end_page < start_page:
+            raise ValueError("end_page must be greater than or equal to start_page")
+        requested_pages = max(1, end_page - start_page + 1)
+        checkpoint.start_page = start_page
+        checkpoint.end_page = end_page
+        checkpoint.total_pages = requested_pages
+
+        existing_docs = self._load_jsonl_documents(jsonl_path) if resume else []
+        docs_by_page: dict[int, list[IndexDocument]] = {}
+        for doc in existing_docs:
+            docs_by_page.setdefault(doc.pdf_page_number, []).append(doc)
+        jsonl_pages = set(docs_by_page)
+
+        resolver = HierarchyResolver()
+        extractions_by_page: dict[int, PageExtraction] = {}
+        if resume:
+            for page_no in range(start_page, end_page + 1):
+                loaded = self._load_page_extraction(page_no)
+                if loaded is not None:
+                    extractions_by_page[page_no] = loaded
+
+        all_docs: list[IndexDocument] = []
+        console.print("[cyan]Extracting, classifying, and indexing pages incrementally...[/cyan]")
+
+        for ordinal, page_no in enumerate(range(start_page, end_page + 1), start=1):
+            check_cancel()
+            checkpoint.current_page = page_no
+            progress = 5.0 + (85.0 * ordinal / requested_pages)
+            page_ex = extractions_by_page.get(page_no)
+            already_extracted = page_ex is not None or page_no in checkpoint.extracted_pages
+            already_in_jsonl = page_no in jsonl_pages
+            already_indexed = page_no in checkpoint.indexed_pages
+
+            if already_extracted and page_ex is None:
+                page_ex = self._load_page_extraction(page_no)
+                if page_ex is None:
+                    already_extracted = False
+
+            if not already_extracted:
+                page = self.reader.render_page(page_no)
+                try:
+                    page_ex = self.extract_page(page, metadata, resume=resume)
+                except JobCancelled:
+                    raise
+                except Exception as exc:
+                    error = {"pdf_page_number": page_no, "stage": "page_extraction", "error": repr(exc)}
+                    with (self.output_dir / "errors.jsonl").open("a", encoding="utf-8") as f:
+                        f.write(json.dumps(error, ensure_ascii=False) + "\n")
+                    console.print(f"[red]Page {page_no} failed: {exc}[/red]")
+                    checkpoint.mark_failed(page_no)
+                    persist("page_extraction", page_no)
+                    emit(
+                        "page_extraction",
+                        progress,
+                        f"Failed page {page_no} of {end_page}",
+                        current_page=page_no,
+                        total_pages=requested_pages,
+                    )
+                    continue
+                checkpoint.mark_extracted(page_no)
+                persist("page_extraction", page_no)
+
+            assert page_ex is not None
+            extractions_by_page[page_no] = page_ex
+            window = [extractions_by_page[p] for p in sorted(extractions_by_page) if p <= page_no]
+            lookahead = [extractions_by_page[p] for p in sorted(extractions_by_page) if p > page_no]
+            if lookahead:
+                window = window + lookahead[:1]
+            self.question_intelligence.enrich_pages(window)
+            page_ex = extractions_by_page[page_no]
+            self._page_extraction_path(page_no).write_text(
+                page_ex.model_dump_json(indent=2), encoding="utf-8"
+            )
+
+            hierarchy = resolver.apply_page(page_ex)
+            if already_indexed:
+                page_docs = docs_by_page.get(page_no, [])
+                if not page_docs:
+                    page_docs = self._build_page_documents(
+                        metadata,
+                        book_id,
+                        page_ex,
+                        hierarchy,
+                        resume=resume,
+                        cancel_check=cancel_check,
+                    )
+                    if page_docs_callback:
+                        page_docs_callback(page_no, page_docs)
+                    self._append_jsonl(jsonl_path, page_docs)
+                    docs_by_page[page_no] = page_docs
+                    jsonl_pages.add(page_no)
+                all_docs.extend(page_docs)
+                emit(
+                    "page_extraction",
+                    progress,
+                    f"Resumed page {page_no} of {end_page} (already indexed)",
+                    current_page=page_no,
+                    total_pages=requested_pages,
+                )
+                continue
+
+            if already_in_jsonl:
+                page_docs = docs_by_page.get(page_no, [])
+                if page_docs_callback:
+                    page_docs_callback(page_no, page_docs)
+                all_docs.extend(page_docs)
+                checkpoint.mark_indexed(page_no)
+                checkpoint.extracted_records = len(all_docs)
+                checkpoint.indexed_records = len(all_docs)
+                checkpoint.visual_assets = sum(1 for d in all_docs if d.asset_id)
+                persist("indexing", page_no)
+                emit(
+                    "indexing",
+                    progress,
+                    f"Re-indexed saved page {page_no} of {end_page}",
+                    current_page=page_no,
+                    total_pages=requested_pages,
+                )
+                continue
+
+            page_docs = self._build_page_documents(
+                metadata,
+                book_id,
+                page_ex,
+                hierarchy,
+                resume=resume,
+                cancel_check=cancel_check,
+            )
+            if page_docs_callback:
+                page_docs_callback(page_no, page_docs)
+            self._append_jsonl(jsonl_path, page_docs)
+            docs_by_page[page_no] = page_docs
+            jsonl_pages.add(page_no)
+            all_docs.extend(page_docs)
+            checkpoint.mark_indexed(page_no)
+            checkpoint.extracted_records = len(all_docs)
+            checkpoint.indexed_records = len(all_docs)
+            checkpoint.visual_assets = sum(1 for d in all_docs if d.asset_id)
+            persist("indexing", page_no)
+            emit(
+                "indexing",
+                progress,
+                f"Extracted and indexed page {page_no} of {end_page}",
+                current_page=page_no,
+                total_pages=requested_pages,
+            )
+
+        check_cancel()
+        emit("artifact_generation", 91.0, "Writing extraction artifacts")
+        docs = self._load_jsonl_documents(jsonl_path) or all_docs
+        extractions = [extractions_by_page[p] for p in sorted(extractions_by_page)]
+        checkpoint.extracted_records = len(docs)
+        checkpoint.indexed_records = len(docs)
+        checkpoint.visual_assets = sum(1 for d in docs if d.asset_id)
+        self._write_run_artifacts(
+            book_id=book_id,
+            metadata=metadata,
+            extractions=extractions,
+            docs=docs,
+            start_page=start_page,
+            end_page=end_page,
+            jsonl_path=jsonl_path,
+        )
+        persist("extraction_complete")
+        emit("extraction_complete", 95.0, "Extraction complete; records already indexed")
         return metadata, book_id, docs

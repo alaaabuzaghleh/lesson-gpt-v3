@@ -155,3 +155,16 @@ def bulk_index(client, index_name: str, docs: list[dict], refresh: bool = True):
     ]
     success, errors = helpers.bulk(client, actions, raise_on_error=False, refresh=refresh)
     return success, errors
+
+
+def delete_documents(client, index_name: str, ids: list[str]) -> int:
+    if not ids:
+        return 0
+    if helpers is None:
+        raise RuntimeError("opensearch-py is not installed. Run: pip install -r requirements.txt")
+    actions = [
+        {"_op_type": "delete", "_index": index_name, "_id": doc_id}
+        for doc_id in ids
+    ]
+    success, _errors = helpers.bulk(client, actions, raise_on_error=False, refresh=True)
+    return int(success)

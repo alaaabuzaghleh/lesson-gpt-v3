@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { ArrowRight, Ban, RotateCcw } from 'lucide-react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { ArrowRight, Ban, Play, Trash2 } from 'lucide-react'
 import { api, subscribeJobEvents } from '../api/client'
 import type { ExtractionJob, JobEvent } from '../types/api'
 import {
@@ -19,6 +19,7 @@ const TAB_KEYS: Tab[] = ['overview', 'events', 'quality', 'manifest', 'errors']
 
 export function JobDetailPage() {
   const { jobId } = useParams<{ jobId: string }>()
+  const navigate = useNavigate()
   const [job, setJob] = useState<ExtractionJob | null>(null)
   const [events, setEvents] = useState<JobEvent[]>([])
   const [tab, setTab] = useState<Tab>('overview')
@@ -84,27 +85,41 @@ export function JobDetailPage() {
     loadArtifact()
   }, [jobId, tab])
 
-  async function handleCancel() {
+  async function handleStop() {
     if (!jobId) return
     setActionLoading(true)
     try {
-      await api.cancelJob(jobId)
+      await api.stopJob(jobId)
       await loadJob()
     } catch (e) {
-      setError(e instanceof Error ? e.message : t.jobDetail.cancelFailed)
+      setError(e instanceof Error ? e.message : t.jobDetail.stopFailed)
     } finally {
       setActionLoading(false)
     }
   }
 
-  async function handleRetry() {
+  async function handleResume() {
     if (!jobId) return
     setActionLoading(true)
     try {
-      const newJob = await api.retryJob(jobId)
-      window.location.href = `/jobs/${newJob.job_id}`
+      await api.resumeJob(jobId)
+      await loadJob()
     } catch (e) {
-      setError(e instanceof Error ? e.message : t.jobDetail.retryFailed)
+      setError(e instanceof Error ? e.message : t.jobDetail.resumeFailed)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  async function handleDelete() {
+    if (!jobId) return
+    if (!window.confirm(t.jobDetail.deleteConfirm)) return
+    setActionLoading(true)
+    try {
+      await api.deleteJob(jobId)
+      navigate('/jobs')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t.jobDetail.deleteFailed)
       setActionLoading(false)
     }
   }
@@ -112,8 +127,10 @@ export function JobDetailPage() {
   if (loading) return <LoadingSpinner />
   if (!job) return <ErrorBanner message={t.jobDetail.notFound} />
 
-  const canCancel = !['completed', 'failed', 'cancelled'].includes(job.status)
-  const canRetry = ['failed', 'cancelled'].includes(job.status)
+  const canStop = ['queued', 'running', 'cancel_requested'].includes(job.status)
+  const canResume = ['paused', 'failed', 'cancelled'].includes(job.status)
+  const canDelete = !['running', 'cancel_requested'].includes(job.status)
+  const indexedPages = job.checkpoint?.indexed_pages?.length
 
   return (
     <div className="page">
@@ -126,14 +143,19 @@ export function JobDetailPage() {
         </div>
         <div className="header-actions">
           <StatusBadge status={job.status} />
-          {canCancel && (
-            <button className="btn btn-danger" onClick={handleCancel} disabled={actionLoading}>
-              <Ban size={16} /> {t.jobDetail.cancel}
+          {canStop && (
+            <button className="btn btn-danger" onClick={handleStop} disabled={actionLoading}>
+              <Ban size={16} /> {t.jobDetail.stop}
             </button>
           )}
-          {canRetry && (
-            <button className="btn btn-primary" onClick={handleRetry} disabled={actionLoading}>
-              <RotateCcw size={16} /> {t.jobDetail.retry}
+          {canResume && (
+            <button className="btn btn-primary" onClick={handleResume} disabled={actionLoading}>
+              <Play size={16} /> {t.jobDetail.resume}
+            </button>
+          )}
+          {canDelete && (
+            <button className="btn btn-ghost" onClick={handleDelete} disabled={actionLoading}>
+              <Trash2 size={16} /> {t.jobDetail.delete}
             </button>
           )}
         </div>
@@ -161,7 +183,7 @@ export function JobDetailPage() {
         />
         <dl className="meta-grid meta-grid-wide">
           <div><dt>{t.jobDetail.book}</dt><dd><Link to={`/books/${job.book_resource_id}`} dir="ltr">{job.book_resource_id.slice(0, 16)}…</Link></dd></div>
-          <div><dt>{t.jobDetail.page}</dt><dd>{job.current_page ?? t.common.dash} / {job.total_pages ?? t.common.dash}</dd></div>
+          <div><dt>{t.jobDetail.page}</dt><dd>{job.current_page ?? t.common.dash} / {job.total_pages ?? t.common.dash}{indexedPages != null ? ` · ${indexedPages}` : ''}</dd></div>
           <div><dt>{t.jobDetail.records}</dt><dd>{job.extracted_records ?? t.common.dash}</dd></div>
           <div><dt>{t.jobDetail.visualAssets}</dt><dd>{job.visual_assets ?? t.common.dash}</dd></div>
           <div><dt>{t.jobDetail.indexed}</dt><dd>{job.indexed_records ?? t.common.dash}</dd></div>

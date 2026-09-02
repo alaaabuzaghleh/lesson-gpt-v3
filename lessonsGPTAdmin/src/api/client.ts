@@ -283,10 +283,19 @@ export const api = {
   getJob: (jobId: string) => request<ExtractionJob>(`/api/v1/jobs/${jobId}`),
 
   cancelJob: (jobId: string) =>
-    request<ExtractionJob>(`/api/v1/jobs/${jobId}/cancel`, { method: 'POST' }),
+    request<ExtractionJob>(`/api/v1/jobs/${jobId}/stop`, { method: 'POST' }),
+
+  stopJob: (jobId: string) =>
+    request<ExtractionJob>(`/api/v1/jobs/${jobId}/stop`, { method: 'POST' }),
+
+  resumeJob: (jobId: string) =>
+    request<ExtractionJob>(`/api/v1/jobs/${jobId}/resume`, { method: 'POST' }),
 
   retryJob: (jobId: string) =>
-    request<ExtractionJob>(`/api/v1/jobs/${jobId}/retry`, { method: 'POST' }),
+    request<ExtractionJob>(`/api/v1/jobs/${jobId}/resume`, { method: 'POST' }),
+
+  deleteJob: (jobId: string) =>
+    request<{ deleted: boolean; job_id: string }>(`/api/v1/jobs/${jobId}`, { method: 'DELETE' }),
 
   listEvents: (jobId: string, afterId = 0, limit = 500) =>
     request<{ items: JobEvent[] }>(`/api/v1/jobs/${jobId}/events?after_id=${afterId}&limit=${limit}`),
@@ -346,7 +355,7 @@ export function subscribeJobEvents(
   }
 
   source.onmessage = handle
-  for (const type of ['queued', 'running', 'stage', 'progress', 'completed', 'failed', 'cancelled']) {
+  for (const type of ['queued', 'running', 'stage', 'progress', 'completed', 'failed', 'cancelled', 'paused', 'resumed', 'stop_requested']) {
     source.addEventListener(type, handle)
   }
   return () => source.close()

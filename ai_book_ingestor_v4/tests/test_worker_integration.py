@@ -29,7 +29,7 @@ class FakePipeline:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def run(self, overrides, start_page=1, end_page=None, resume=True, progress_callback=None, cancel_check=None):
+    def run(self, overrides, start_page=1, end_page=None, resume=True, progress_callback=None, cancel_check=None, **kwargs):
         if progress_callback:
             progress_callback({"stage": "metadata", "progress": 5, "message": "metadata", "total_pages": 2})
             progress_callback({"stage": "page_extraction", "progress": 60, "message": "page 2", "current_page": 2, "total_pages": 2})
@@ -126,3 +126,43 @@ def test_worker_records_readable_pipeline_failure(tmp_path, monkeypatch, pg_stor
     failed = [event for event in store.list_events(job_id) if event["event_type"] == "failed"][-1]
     assert failed["payload"]["error"]
     assert failed["payload"]["traceback"]
+
+
+def test_worker_pauses_when_pipeline_stops(tmp_path, monkeypatch, pg_store):
+    from book_ingestor.pipeline import JobCancelled
+
+    class StopPipeline:
+        def __init__(self, pdf_path, output_dir):
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            (Path(output_dir) / "checkpoint.json").write_text(
+                '{"book_id":"paused-book","indexed_pages":[1],"extracted_pages":[1,2]}',
+                encoding="utf-8",
+            )
+
+        def run(self, *args, **kwargs):
+            raise JobCancelled("Extraction job was stopped")
+
+    store = pg_store
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF")
+    resource_id = f"b-{uuid.uuid4().hex[:12]}"
+    store.create_book(resource_id, "book.pdf", str(pdf), pdf.stat().st_size, "hash", {"country": "Jordan"})
+    job_id = f"j-{uuid.uuid4().hex[:12]}"
+    store.create_job(
+        job_id=job_id,
+        book_resource_id=resource_id,
+        output_dir=str(tmp_path / "out"),
+        start_page=1,
+        end_page=None,
+        resume=True,
+        index_to_opensearch=False,
+        recreate_index=False,
+        metadata_overrides={},
+    )
+    job = store.claim_next_job()
+    monkeypatch.setattr(worker_module, "BookIngestionPipeline", StopPipeline)
+    pool = worker_module.ExtractionWorkerPool(store, worker_count=1)
+    pool._run_job(job)
+    done = store.get_job(job_id)
+    assert done["status"] == "paused"
+    assert done["checkpoint"]["indexed_pages"] == [1]

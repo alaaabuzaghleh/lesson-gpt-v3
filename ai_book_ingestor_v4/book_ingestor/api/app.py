@@ -46,7 +46,7 @@ ALLOWED_HERO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".svg"}
 store = JobStore(settings.database_url)
 workers = ExtractionWorkerPool(store)
 
-TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+TERMINAL_STATUSES = {"completed", "failed", "cancelled", "paused"}
 
 
 def _catalog_entity_exists(entity_type: str, entity_id: str) -> bool:
@@ -116,6 +116,7 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
         "error": job.get("error"),
         "traceback": job.get("traceback"),
         "retry_of": job.get("retry_of"),
+        "checkpoint": job.get("checkpoint"),
         "created_at": job["created_at"],
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
@@ -717,37 +718,74 @@ def get_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
     return _public_job(job)
 
 
-@app.post("/api/v1/jobs/{job_id}/cancel", status_code=202)
-def cancel_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
-    job = store.request_cancel(job_id)
+@app.post("/api/v1/jobs/{job_id}/stop", status_code=202)
+def stop_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
+    job = store.request_stop(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
     if job["status"] in {"completed", "failed"}:
-        raise HTTPException(409, f"Cannot cancel a {job['status']} job")
+        raise HTTPException(409, f"Cannot stop a {job['status']} job")
+    return _public_job(job)
+
+
+@app.post("/api/v1/jobs/{job_id}/cancel", status_code=202)
+def cancel_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
+    return stop_job(job_id, _)
+
+
+@app.post("/api/v1/jobs/{job_id}/resume", status_code=202)
+def resume_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
+    old = store.get_job(job_id)
+    if not old:
+        raise HTTPException(404, "Job not found")
+    if old["status"] not in {"paused", "failed", "cancelled"}:
+        raise HTTPException(409, "Only paused, failed, or cancelled jobs can be resumed")
+    job = store.resume_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
     return _public_job(job)
 
 
 @app.post("/api/v1/jobs/{job_id}/retry", status_code=202)
 def retry_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
-    old = store.get_job(job_id)
-    if not old:
+    return resume_job(job_id, _)
+
+
+@app.delete("/api/v1/jobs/{job_id}")
+def delete_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
+    job = store.get_job(job_id)
+    if not job:
         raise HTTPException(404, "Job not found")
-    if old["status"] not in {"failed", "cancelled"}:
-        raise HTTPException(409, "Only failed or cancelled jobs can be retried")
-    new_id = uuid.uuid4().hex
-    job = store.create_job(
-        job_id=new_id,
-        book_resource_id=old["book_resource_id"],
-        output_dir=old["output_dir"],
-        start_page=old["start_page"],
-        end_page=old.get("end_page"),
-        resume=True,
-        index_to_opensearch=old["index_to_opensearch"],
-        recreate_index=False,
-        metadata_overrides=old.get("metadata_overrides") or {},
-        retry_of=job_id,
-    )
-    return _public_job(job)
+    result = store.delete_job(job_id)
+    if not result:
+        raise HTTPException(404, "Job not found")
+    if result.get("error") == "job_active":
+        raise HTTPException(409, "Stop the job before deleting it")
+    deleted_job = result["job"]
+    output_dir = deleted_job.get("output_dir")
+    doc_ids: list[str] = []
+    jsonl_path = Path(str(output_dir)) / "index" / "documents.jsonl" if output_dir else None
+    if jsonl_path and jsonl_path.exists():
+        for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("id"):
+                doc_ids.append(str(payload["id"]))
+    if output_dir:
+        shutil.rmtree(output_dir, ignore_errors=True)
+    if doc_ids:
+        try:
+            from ..opensearch_index import create_client, delete_documents
+
+            delete_documents(create_client(), settings.opensearch_index, doc_ids)
+        except Exception:
+            pass
+    return {"deleted": True, "job_id": job_id, "deleted_index_docs": len(doc_ids)}
 
 
 @app.get("/api/v1/jobs/{job_id}/events")

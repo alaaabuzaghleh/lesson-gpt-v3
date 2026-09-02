@@ -3,6 +3,7 @@ export type JobStatus =
   | 'running'
   | 'cancel_requested'
   | 'cancelled'
+  | 'paused'
   | 'failed'
   | 'completed'
 
@@ -160,6 +161,19 @@ export interface ExtractionJob {
   error: string | null
   traceback?: string | null
   retry_of: string | null
+  checkpoint?: {
+    book_id?: string | null
+    extracted_pages?: number[]
+    indexed_pages?: number[]
+    failed_pages?: number[]
+    extracted_records?: number
+    indexed_records?: number
+    visual_assets?: number
+    stage?: string
+    current_page?: number | null
+    total_pages?: number | null
+    updated_at?: string | null
+  } | null
   created_at: string
   started_at: string | null
   finished_at: string | null

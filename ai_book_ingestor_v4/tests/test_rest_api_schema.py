@@ -16,6 +16,8 @@ def test_rest_api_routes_are_exposed():
         "/api/v1/books/{resource_id}/extraction-jobs",
         "/api/v1/jobs/{job_id}",
         "/api/v1/jobs/{job_id}/cancel",
+        "/api/v1/jobs/{job_id}/stop",
+        "/api/v1/jobs/{job_id}/resume",
         "/api/v1/jobs/{job_id}/retry",
         "/api/v1/jobs/{job_id}/events",
         "/api/v1/jobs/{job_id}/events/stream",

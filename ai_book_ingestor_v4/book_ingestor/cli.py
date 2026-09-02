@@ -47,21 +47,57 @@ def ingest(
         "language": language,
     }
     pipeline = BookIngestionPipeline(pdf, output)
-    _, book_id, docs = pipeline.run(overrides, start_page, end_page, resume)
+    os_client = None
+    indexed_records = 0
+    if index:
+        from .opensearch_index import bulk_index, create_client, ensure_index
+        from .checkpoint import JobCheckpoint, checkpoint_path
+
+        os_client = create_client()
+        existing = JobCheckpoint.load(checkpoint_path(output)) if resume else None
+        recreate = recreate_index and not (existing and existing.indexed_pages)
+        ensure_index(os_client, settings.opensearch_index, recreate=recreate)
+
+    def on_page_docs(page_no, docs):
+        nonlocal indexed_records
+        if os_client is None or not docs:
+            return
+        from .opensearch_index import bulk_index
+
+        success, errors = bulk_index(
+            os_client, settings.opensearch_index, [d.model_dump(mode="json") for d in docs], refresh=False
+        )
+        indexed_records += int(success)
+        if errors:
+            console.print(f"[red]Bulk errors on page {page_no}:[/red] {len(errors)}")
+
+    _, book_id, docs = pipeline.run(
+        overrides,
+        start_page,
+        end_page,
+        resume,
+        page_docs_callback=on_page_docs if index else None,
+    )
 
     console.print(f"[green]Book ID:[/green] {book_id}")
     console.print(f"[green]Extracted records:[/green] {len(docs)}")
     console.print(f"[green]Visual assets:[/green] {sum(1 for d in docs if d.asset_id)}")
 
-    if index:
-        from .opensearch_index import bulk_index, create_client, ensure_index
+    if os_client is not None:
+        try:
+            os_client.indices.refresh(index=settings.opensearch_index)
+        except Exception:
+            pass
+        if indexed_records == 0 and docs:
+            from .opensearch_index import bulk_index
 
-        client = create_client()
-        ensure_index(client, settings.opensearch_index, recreate=recreate_index)
-        success, errors = bulk_index(client, settings.opensearch_index, [d.model_dump(mode="json") for d in docs])
-        console.print(f"[green]Indexed:[/green] {success}")
-        if errors:
-            console.print(f"[red]Bulk errors:[/red] {len(errors)}")
+            success, errors = bulk_index(
+                os_client, settings.opensearch_index, [d.model_dump(mode="json") for d in docs]
+            )
+            indexed_records = int(success)
+            if errors:
+                console.print(f"[red]Bulk errors:[/red] {len(errors)}")
+        console.print(f"[green]Indexed:[/green] {indexed_records}")
 
 
 @app.command("create-index")

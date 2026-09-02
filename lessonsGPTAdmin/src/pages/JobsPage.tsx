@@ -13,7 +13,7 @@ import {
 import { stageLabel, statusLabel, t } from '../i18n/ar'
 
 const STATUSES: (JobStatus | 'all')[] = [
-  'all', 'queued', 'running', 'completed', 'failed', 'cancelled',
+  'all', 'queued', 'running', 'paused', 'completed', 'failed', 'cancelled',
 ]
 
 export function JobsPage() {

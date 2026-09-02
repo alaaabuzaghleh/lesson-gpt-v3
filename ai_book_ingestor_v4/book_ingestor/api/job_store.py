@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     error TEXT,
     traceback TEXT,
     retry_of TEXT,
+    checkpoint_json JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
@@ -167,6 +168,7 @@ class JobStore:
         with self._init_lock, self.pool.connection() as conn:
             conn.execute(SCHEMA_SQL)
             self._migrate_catalog_seo(conn)
+            self._migrate_jobs(conn)
             conn.commit()
             self._seed_super_admin(conn)
         self._reset_pool_after_schema_change()
@@ -259,6 +261,9 @@ class JobStore:
         sets = ", ".join(f"{k}=%s" for k in seo_data)
         conn.execute(f"UPDATE {table} SET {sets} WHERE id=%s", (*seo_data.values(), row_id))
 
+    def _migrate_jobs(self, conn: psycopg.Connection) -> None:
+        conn.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS checkpoint_json JSONB")
+
     def _migrate_catalog_seo(self, conn: psycopg.Connection) -> None:
         for table in CATALOG_TABLES:
             for col, col_type in SEO_COLUMN_DEFS:
@@ -323,6 +328,8 @@ class JobStore:
             d["result"] = d.pop("result_json")
         if "payload_json" in d:
             d["payload"] = d.pop("payload_json")
+        if "checkpoint_json" in d:
+            d["checkpoint"] = d.pop("checkpoint_json")
         return d
 
     # --- Users / Auth ---
@@ -1195,7 +1202,35 @@ class JobStore:
             payload={"error": error, "traceback": traceback_text},
         )
 
-    def request_cancel(self, job_id: str) -> dict[str, Any] | None:
+    def save_checkpoint(self, job_id: str, checkpoint: dict[str, Any] | None) -> None:
+        if not checkpoint:
+            return
+        now = utcnow()
+        with self.pool.connection() as conn:
+            conn.execute(
+                """UPDATE jobs SET checkpoint_json=%s::jsonb, book_id=COALESCE(%s, book_id),
+                   extracted_records=COALESCE(%s, extracted_records),
+                   indexed_records=COALESCE(%s, indexed_records),
+                   visual_assets=COALESCE(%s, visual_assets),
+                   current_page=COALESCE(%s, current_page),
+                   total_pages=COALESCE(%s, total_pages),
+                   updated_at=%s
+                   WHERE job_id=%s""",
+                (
+                    json.dumps(checkpoint, ensure_ascii=False),
+                    checkpoint.get("book_id"),
+                    checkpoint.get("extracted_records"),
+                    checkpoint.get("indexed_records"),
+                    checkpoint.get("visual_assets"),
+                    checkpoint.get("current_page"),
+                    checkpoint.get("total_pages"),
+                    now,
+                    job_id,
+                ),
+            )
+            conn.commit()
+
+    def request_stop(self, job_id: str) -> dict[str, Any] | None:
         job = self.get_job(job_id)
         if not job:
             return None
@@ -1203,38 +1238,83 @@ class JobStore:
         if job["status"] == "queued":
             with self.pool.connection() as conn:
                 conn.execute(
-                    """UPDATE jobs SET status='cancelled', stage='cancelled', message='Cancelled before execution',
+                    """UPDATE jobs SET status='paused', stage='paused', message='Stopped before execution',
                        finished_at=%s, updated_at=%s WHERE job_id=%s AND status='queued'""",
                     (now, now, job_id),
                 )
                 conn.commit()
-            self.add_event(job_id, "cancelled", stage="cancelled", progress=job.get("progress"), message="Cancelled before execution")
+            self.add_event(
+                job_id, "paused", stage="paused", progress=job.get("progress"),
+                message="Stopped before execution",
+            )
         elif job["status"] == "running":
             with self.pool.connection() as conn:
                 conn.execute(
                     """UPDATE jobs SET status='cancel_requested', stage='cancel_requested',
-                       message='Cancellation requested', updated_at=%s WHERE job_id=%s AND status='running'""",
+                       message='Stop requested', updated_at=%s WHERE job_id=%s AND status='running'""",
                     (now, job_id),
                 )
                 conn.commit()
-            self.add_event(job_id, "cancel_requested", stage="cancel_requested", progress=job.get("progress"), message="Cancellation requested")
+            self.add_event(
+                job_id, "stop_requested", stage="cancel_requested", progress=job.get("progress"),
+                message="Stop requested; will pause after the current page",
+            )
         return self.get_job(job_id)
 
-    def mark_cancelled(self, job_id: str, message: str = "Job cancelled") -> None:
+    def request_cancel(self, job_id: str) -> dict[str, Any] | None:
+        return self.request_stop(job_id)
+
+    def mark_paused(self, job_id: str, message: str = "Job paused") -> None:
         now = utcnow()
         with self.pool.connection() as conn:
             conn.execute(
-                """UPDATE jobs SET status='cancelled', stage='cancelled', message=%s, finished_at=%s, updated_at=%s
+                """UPDATE jobs SET status='paused', stage='paused', message=%s, finished_at=%s, updated_at=%s
                    WHERE job_id=%s""",
                 (message, now, now, job_id),
             )
             conn.commit()
-        self.add_event(job_id, "cancelled", stage="cancelled", message=message)
+        self.add_event(job_id, "paused", stage="paused", message=message)
+
+    def mark_cancelled(self, job_id: str, message: str = "Job cancelled") -> None:
+        self.mark_paused(job_id, message)
+
+    def resume_job(self, job_id: str) -> dict[str, Any] | None:
+        job = self.get_job(job_id)
+        if not job:
+            return None
+        if job["status"] not in {"paused", "failed", "cancelled"}:
+            return job
+        now = utcnow()
+        with self.pool.connection() as conn:
+            conn.execute(
+                """UPDATE jobs SET status='queued', stage='queued',
+                   message='Resuming from checkpoint', resume=TRUE, recreate_index=FALSE,
+                   error=NULL, traceback=NULL, finished_at=NULL, updated_at=%s
+                   WHERE job_id=%s""",
+                (now, job_id),
+            )
+            conn.commit()
+        self.add_event(
+            job_id, "resumed", stage="queued", progress=job.get("progress"),
+            message="Job resumed from checkpoint",
+        )
+        return self.get_job(job_id)
+
+    def delete_job(self, job_id: str) -> dict[str, Any] | None:
+        job = self.get_job(job_id)
+        if not job:
+            return None
+        if job["status"] in {"running", "cancel_requested"}:
+            return {"error": "job_active", "job": job}
+        with self.pool.connection() as conn:
+            conn.execute("DELETE FROM jobs WHERE job_id=%s", (job_id,))
+            conn.commit()
+        return {"deleted": True, "job": job}
 
     def is_cancel_requested(self, job_id: str) -> bool:
         with self.pool.connection() as conn:
             row = conn.execute("SELECT status FROM jobs WHERE job_id=%s", (job_id,)).fetchone()
-        return bool(row and row["status"] in {"cancel_requested", "cancelled"})
+        return bool(row and row["status"] in {"cancel_requested", "cancelled", "paused"})
 
     def add_event(
         self,
@@ -1268,8 +1348,8 @@ class JobStore:
     def recover_incomplete_jobs(self) -> dict[str, int]:
         now = utcnow()
         with self.pool.connection() as conn:
-            cancelled = conn.execute(
-                """UPDATE jobs SET status='cancelled', stage='cancelled', message='Cancelled during service restart',
+            paused = conn.execute(
+                """UPDATE jobs SET status='paused', stage='paused', message='Stopped during service restart',
                    finished_at=%s, updated_at=%s WHERE status='cancel_requested'""",
                 (now, now),
             ).rowcount
@@ -1279,4 +1359,4 @@ class JobStore:
                 (now,),
             ).rowcount
             conn.commit()
-        return {"requeued": requeued, "cancelled": cancelled}
+        return {"requeued": requeued, "paused": paused, "cancelled": 0}

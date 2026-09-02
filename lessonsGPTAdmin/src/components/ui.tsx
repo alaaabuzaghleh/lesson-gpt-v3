@@ -8,6 +8,7 @@ const STATUS_STYLES: Record<JobStatus, string> = {
   running: 'badge-running',
   cancel_requested: 'badge-warning',
   cancelled: 'badge-muted',
+  paused: 'badge-warning',
   failed: 'badge-failed',
   completed: 'badge-success',
 }

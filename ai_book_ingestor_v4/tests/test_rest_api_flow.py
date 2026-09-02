@@ -85,11 +85,25 @@ def test_upload_create_track_cancel_job(api_client):
 
     cancelled = client.post(f"/api/v1/jobs/{job_id}/cancel", headers=headers)
     assert cancelled.status_code == 202
-    assert cancelled.json()["status"] == "cancelled"
+    assert cancelled.json()["status"] == "paused"
 
     events = client.get(f"/api/v1/jobs/{job_id}/events", headers=headers).json()["items"]
     assert "queued" in [x["event_type"] for x in events]
-    assert "cancelled" in [x["event_type"] for x in events]
+    assert "paused" in [x["event_type"] for x in events]
+
+    resumed = client.post(f"/api/v1/jobs/{job_id}/resume", headers=headers)
+    assert resumed.status_code == 202
+    assert resumed.json()["status"] == "queued"
+    assert resumed.json()["job_id"] == job_id
+
+    stopped = client.post(f"/api/v1/jobs/{job_id}/stop", headers=headers)
+    assert stopped.status_code == 202
+    assert stopped.json()["status"] == "paused"
+
+    deleted = client.delete(f"/api/v1/jobs/{job_id}", headers=headers)
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert client.get(f"/api/v1/jobs/{job_id}", headers=headers).status_code == 404
 
     deleted = client.delete(f"/api/v1/books/{resource_id}", headers=headers)
     assert deleted.status_code == 200

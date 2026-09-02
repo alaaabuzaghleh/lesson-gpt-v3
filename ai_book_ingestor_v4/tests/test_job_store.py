@@ -82,7 +82,7 @@ def test_cancel_queued_and_running_jobs(store, tmp_path):
         recreate_index=False,
         metadata_overrides={},
     )
-    assert store.request_cancel(qid)["status"] == "cancelled"
+    assert store.request_cancel(qid)["status"] == "paused"
 
     rid = uuid.uuid4().hex
     store.create_job(
@@ -101,7 +101,7 @@ def test_cancel_queued_and_running_jobs(store, tmp_path):
     assert store.request_cancel(claimed["job_id"])["status"] == "cancel_requested"
     assert store.is_cancel_requested(claimed["job_id"]) is True
     store.mark_cancelled(claimed["job_id"])
-    assert store.get_job(claimed["job_id"])["status"] == "cancelled"
+    assert store.get_job(claimed["job_id"])["status"] == "paused"
 
 
 def test_restart_recovery(store, tmp_path):
@@ -150,3 +150,55 @@ def test_fail_job_stores_error_on_event_payload(store, tmp_path):
     assert failed["message"] == "Vision model returned empty content"
     assert failed["payload"]["error"] == "Vision model returned empty content"
     assert failed["payload"]["traceback"] == "Traceback: boom"
+
+
+def test_stop_resume_and_delete_job(store, tmp_path):
+    book = _book(store, tmp_path)
+    job_id = uuid.uuid4().hex
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    store.create_job(
+        job_id=job_id,
+        book_resource_id=book["resource_id"],
+        output_dir=str(output_dir),
+        start_page=1,
+        end_page=None,
+        resume=True,
+        index_to_opensearch=False,
+        recreate_index=False,
+        metadata_overrides={},
+    )
+    claimed = store.claim_next_job()
+    assert claimed["status"] == "running"
+    store.save_checkpoint(
+        job_id,
+        {
+            "book_id": "semantic-1",
+            "extracted_pages": [1, 2],
+            "indexed_pages": [1],
+            "extracted_records": 4,
+            "indexed_records": 2,
+            "visual_assets": 1,
+            "current_page": 2,
+            "total_pages": 10,
+            "stage": "indexing",
+        },
+    )
+    store.request_stop(job_id)
+    store.mark_paused(job_id, "Stopped by user")
+    paused = store.get_job(job_id)
+    assert paused["status"] == "paused"
+    assert paused["checkpoint"]["indexed_pages"] == [1]
+    assert paused["extracted_records"] == 4
+    assert paused["book_id"] == "semantic-1"
+
+    resumed = store.resume_job(job_id)
+    assert resumed["status"] == "queued"
+    assert resumed["job_id"] == job_id
+    assert resumed["resume"] is True
+    assert resumed["error"] is None
+
+    store.request_stop(job_id)
+    deleted = store.delete_job(job_id)
+    assert deleted["deleted"] is True
+    assert store.get_job(job_id) is None
