@@ -1,21 +1,17 @@
-# localLessonsGPT — application services (Docker)
-# remoteLessonsGPT API — requires infra network from ../infra/docker-compose.yml
-#
-# Config: ../remote-lessons-gpt/.env (auth, index, workers)
-# Start:  ./scripts/local up apps
+# remoteLessonsGPT — local dev (Docker)
+# Requires infra:  cd ../infra && docker compose up -d
+# Config:          cp .env.example .env
+# Start:           ./up.sh
 
-name: lessons-gpt-apps
+name: lessons-gpt-remote
 
 services:
   remote-api:
-    build:
-      context: ../remote-lessons-gpt
-      dockerfile: Dockerfile
+    build: .
     container_name: lessons-gpt-remote-api
     env_file:
-      - ../remote-lessons-gpt/.env
+      - .env
     environment:
-      # Docker infra hostnames (override localhost URLs from remote .env)
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/lessons_gpt
       OPENSEARCH_URL: http://opensearch:9200
       API_HOST: 0.0.0.0
@@ -28,7 +24,6 @@ services:
       - remote-api-data:/app/data
     networks:
       - lessons-gpt
-    depends_on: []
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')\""]
       interval: 15s

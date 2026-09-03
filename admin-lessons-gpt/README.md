@@ -4,14 +4,14 @@ Arabic RTL admin dashboard for **extractorLessonsGPT** (local) and **remoteLesso
 
 ## What it connects to
 
-| Traffic | Target |
-|---------|--------|
-| Login, catalog, search | remoteLessonsGPT (via extractor proxy) |
-| Books, jobs, uploads | extractorLessonsGPT API (:8080) |
+| Traffic | Target | Dev proxy |
+|---------|--------|-----------|
+| Login, catalog, search | remoteLessonsGPT `:8081` | `/remote-api` |
+| Books, jobs, uploads | extractorLessonsGPT `:8080` | `/api` |
 
 ## Run
 
-See [local-lessons-gpt](../local-lessons-gpt/README.md) for the full stack, or:
+Start Docker first ([infra](../infra) + [remote-lessons-gpt](../remote-lessons-gpt)), then:
 
 ```bash
 cd admin-lessons-gpt
@@ -21,13 +21,6 @@ npm run dev
 
 Open http://localhost:5173/login
 
-Leave `VITE_API_BASE_URL` empty so Vite proxies `/api` and `/health` to `http://localhost:8080`.
+Leave `VITE_REMOTE_API_BASE_URL` and `VITE_EXTRACTOR_API_BASE_URL` empty in `.env`.
 
-## Features
-
-- Remote admin login (email/password)
-- Catalog hierarchy (country → system → grade → subject)
-- PDF upload and extraction job control
-- Live job progress (SSE)
-- Search indexed content on remote OpenSearch
-- Per-page remote publish status on job detail
+See the [root README](../README.md) for the full stack.

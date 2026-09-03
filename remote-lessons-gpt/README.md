@@ -11,18 +11,20 @@ Universal Arabic/English textbook ingestion framework with REST API, background 
 | **remoteLessonsGPT** (this) | 8081 | Production API + student search index |
 | [extractorLessonsGPT](../extractor-lessons-gpt) | 8080 | Local PDF extraction |
 | [adminLessonsGPT](../admin-lessons-gpt) | 5173 | Admin UI |
-| [localLessonsGPT](../local-lessons-gpt) | — | Dev orchestration |
+| [infra](../infra) | — | Postgres + OpenSearch (Docker) |
 
 ## Quick start
 
-For **local development**, use [localLessonsGPT](../local-lessons-gpt/README.md):
+For **local development** (infra + API separated):
 
 ```bash
-cd ../local-lessons-gpt
-./scripts/local up all
+cd ../infra && ./up.sh
+cd ../remote-lessons-gpt
+cp .env.example .env
+./up.sh
 ```
 
-Standalone deploy (all-in-one on this folder):
+Standalone all-in-one (Postgres + OpenSearch + API in one file):
 
 ```bash
 cd remote-lessons-gpt

@@ -1,22 +1,28 @@
 # Infrastructure
 
-PostgreSQL and OpenSearch run here in Docker. **Only `remote-lessons-gpt`** should connect to them.
+PostgreSQL and OpenSearch in Docker. **Only `remote-lessons-gpt`** connects to them.
 
-| Service | URL (host) |
-|---------|------------|
-| PostgreSQL | `localhost:5432` — user `postgres`, password `postgres`, db `lessons_gpt` |
-| OpenSearch | `http://localhost:9200` |
-| OpenSearch Dashboards | `http://localhost:5601` |
-| pgAdmin | `http://localhost:5050` — `admin@lessonsgpt.local` / `admin` |
+| Service | URL |
+|---------|-----|
+| PostgreSQL | `localhost:5432` — `postgres` / `postgres`, db `lessons_gpt` |
+| OpenSearch | http://localhost:9200 |
+| OpenSearch Dashboards | http://localhost:5601 |
+| pgAdmin | http://localhost:5050 — `admin@lessonsgpt.local` / `admin` |
 
-Start/stop via the local orchestrator:
+## Start / stop
 
 ```bash
-cd ../local-lessons-gpt
-./scripts/local up infra
-./scripts/local down infra
+cd infra
+./up.sh      # or: docker compose up -d
+./down.sh    # or: docker compose down
 ```
 
-The remote API (`local-lessons-gpt/docker-compose.apps.yml`) joins the `lessons-gpt` network and uses hostnames `postgres` and `opensearch`.
+Then start the remote API:
 
-Local extractors publish extracted pages through the remote HTTP ingest API (`REMOTE_API_URL`), never directly to Postgres or OpenSearch.
+```bash
+cd ../remote-lessons-gpt
+cp .env.example .env
+./up.sh
+```
+
+Extractors publish pages through the remote HTTP ingest API — never directly to Postgres or OpenSearch.

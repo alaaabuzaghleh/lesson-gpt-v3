@@ -16,11 +16,11 @@ Set `REMOTE_API_URL` in `.env` to your remoteLessonsGPT deployment. The extracto
 
 ## Quick start
 
-Start infrastructure and remote API via [localLessonsGPT](../local-lessons-gpt/README.md):
+Start infrastructure and remote API:
 
 ```bash
-cd ../local-lessons-gpt
-./scripts/local up all
+cd ../infra && ./up.sh
+cd ../remote-lessons-gpt && cp .env.example .env && ./up.sh
 ```
 
 Then run the extractor on your host:
@@ -53,4 +53,4 @@ python run_extract.py run book.pdf --backend local --resume
 python run_extract.py doctor --backend local
 ```
 
-See the [root README](../README.md) and [local-lessons-gpt](../local-lessons-gpt/README.md) for the full system setup.
+See the [root README](../README.md) for the full system setup.

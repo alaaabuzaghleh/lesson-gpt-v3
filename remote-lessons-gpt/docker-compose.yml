@@ -1,9 +1,8 @@
-# For local development, use localLessonsGPT instead:
+# Standalone all-in-one stack (Postgres + OpenSearch + API in one compose file).
 #
-#   cd ../local-lessons-gpt
-#   ./scripts/local up all
-#
-# This file is kept for standalone / production deployment of remoteLessonsGPT only.
+# For local dev with separated infra, use instead:
+#   cd ../infra && ./up.sh
+#   cd ../remote-lessons-gpt && cp .env.example .env && ./up.sh
 
 services:
   postgres:
