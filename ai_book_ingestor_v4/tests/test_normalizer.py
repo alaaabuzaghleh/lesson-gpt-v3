@@ -32,6 +32,15 @@ def test_restore_arabic_forces_remaining_lines_on_visual_page():
     assert restore_arabic_logical_order("$$F = ma$$") == "$$F = ma$$"
 
 
+def test_restore_math_sentence_visual_order():
+    visual = "لحلا ناف،وه نيددعلل ربكالا كرتشملا مساقلا نا امب"
+    restored = restore_arabic_logical_order(visual)
+    assert "القاسم المشترك" in restored
+    assert restored.startswith("بما")
+    assert "الحل" in restored
+    assert looks_like_visual_arabic(visual)
+
+
 def test_looks_like_visual_arabic():
     assert looks_like_visual_arabic("ميلعتلا ةرازو")
     assert not looks_like_visual_arabic("وزارة التعليم")

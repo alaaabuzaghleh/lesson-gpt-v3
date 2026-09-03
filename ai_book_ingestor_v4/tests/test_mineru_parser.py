@@ -33,7 +33,7 @@ def test_mineru_ocr_language_maps_arabic_and_english():
     assert mineru_ocr_language(None) == "arabic"
 
 
-def test_parse_content_list_keeps_mineru_arabic_as_is():
+def test_parse_content_list_restores_reversed_arabic():
     pages = parse_content_list(
         [
             {
@@ -47,10 +47,17 @@ def test_parse_content_list_keeps_mineru_arabic_as_is():
                 "text": "تاراسملا ماظن",
                 "page_idx": 0,
             },
+            {
+                "type": "text",
+                "text": "لحلا ناف،وه نيددعلل ربكالا كرتشملا مساقلا نا امب",
+                "page_idx": 0,
+            },
         ]
     )
-    assert "ميلعتلا ةرازو" in pages[1].text
-    assert "تاراسملا ماظن" in pages[1].text
+    assert "وزارة التعليم" in pages[1].text
+    assert "نظام المسارات" in pages[1].text
+    assert "القاسم المشترك" in pages[1].text
+    assert "لحلا" not in pages[1].text
 
 
 def test_parse_content_list_applies_page_offset_and_formats_tables():

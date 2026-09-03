@@ -12,6 +12,7 @@ from rich.progress import Progress
 from .checkpoint import JobCheckpoint, checkpoint_path
 from .config import settings
 from .hierarchy import HierarchyResolver, build_content_tree, hierarchy_path_from
+from .ocr_cleanup import repair_arabic_ocr
 from .mineru_parser import (
     MinerUError,
     MinerUPage,
@@ -591,7 +592,7 @@ class BookIngestionPipeline:
         if mineru_page is None:
             mineru_page = MinerUPage(pdf_page_number=page_no)
 
-        ocr_text = page_data.text_layer or mineru_page.text or ""
+        ocr_text = repair_arabic_ocr(page_data.text_layer or mineru_page.text or "")
         indexable_blocks = [block for block in mineru_page.blocks if mineru_block_is_indexable(block)]
         ocr_source = page_data.text_source or (
             "mineru" if self.reader.mineru is not None and self.reader.mineru.page(page_no) else "pdf"
@@ -640,7 +641,7 @@ class BookIngestionPipeline:
         seq = 0
         for block in indexable_blocks:
             seq += 1
-            text = (block.text or "").strip()
+            text = repair_arabic_ocr(block.text or "")
             if not text:
                 continue
             ctype = mineru_content_type(block)

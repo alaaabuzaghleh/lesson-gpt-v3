@@ -38,9 +38,9 @@ class Settings(BaseSettings):
     mineru_required: bool = False
     mineru_api_url: str = ""
     mineru_backend: str = "pipeline"
-    mineru_parse_method: str = "auto"
+    mineru_parse_method: str = "ocr"
     mineru_language: str = "arabic"
-    mineru_effort: str = "medium"
+    mineru_effort: str = "high"
     mineru_formula_enable: bool = True
     mineru_table_enable: bool = True
     mineru_image_analysis: bool = True

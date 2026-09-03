@@ -7,21 +7,28 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .normalizer import normalize_general
+from .ocr_cleanup import repair_arabic_ocr
 from .schemas import HierarchyContext, IndexDocument, PageExtraction
 
+_ORDINAL = (
+    r"(?:[0-9٠-٩]+(?:\s*[-–]\s*[0-9٠-٩]+)?|"
+    r"الأول|الاول|الأولى|الاولى|الثاني|الثانية|الثالث|الثالثة|"
+    r"الرابع|الرابعة|الخامس|الخامسة|السادس|السادسة|"
+    r"السابع|السابعة|الثامن|الثامنة|التاسع|التاسعة|العاشر|العاشرة)"
+)
 _UNIT_RE = re.compile(
-    r"(?<![\u0600-\u06FF])(الوحدة|وحدة)\s*(?:[:.\-–])?\s*([0-9٠-٩]+|[^\n]{1,40})",
+    rf"(?<![\u0600-\u06FF])(الوحدة|وحدة)\s*(?:[:.\-–])?\s*({_ORDINAL}[^\n]{{0,40}})"
 )
 _CHAPTER_RE = re.compile(
-    r"(الفصل|فصل)\s*(?:[:.\-–])?\s*([0-9٠-٩]+|[^\n]{1,40})",
+    rf"(?<![\u0600-\u06FF])(الفصل|فصل)\s*(?:[:.\-–])?\s*({_ORDINAL}[^\n]{{0,40}})"
 )
 _LESSON_RE = re.compile(
-    r"(الدرس|درس)\s*(?:[:.\-–])?\s*([0-9٠-٩]+(?:\s*[-–]\s*[0-9٠-٩]+)?|[^\n]{1,40})",
+    rf"(?<![\u0600-\u06FF])(الدرس|درس)\s*(?:[:.\-–])?\s*({_ORDINAL}[^\n]{{0,40}})"
 )
 
 
 def _clip_heading(prefix: str, rest: str) -> str:
-    rest = (rest or "").strip(" :.-–،,")
+    rest = repair_arabic_ocr(rest or "").strip(" :.-–،,")
     rest = re.split(r"[\n|/]", rest, maxsplit=1)[0].strip()
     if len(rest) > 80:
         rest = rest[:80].rstrip()
@@ -33,7 +40,7 @@ def _clip_heading(prefix: str, rest: str) -> str:
 
 
 def infer_structure_headings(text: str) -> dict[str, str | None]:
-    blob = text or ""
+    blob = repair_arabic_ocr(text or "")
     found: dict[str, str | None] = {"unit": None, "chapter": None, "lesson": None}
     unit = _UNIT_RE.search(blob)
     if unit and not unit.group(0).startswith("بوحدة"):
@@ -209,7 +216,7 @@ class HierarchyResolver:
         )
 
     def apply_ocr_text(self, text: str, *, content_type: str | None = None, title: str | None = None) -> HierarchyContext:
-        heading = (title or text or "").strip()
+        heading = repair_arabic_ocr(title or text or "")
         inferred = infer_structure_headings(heading)
         # Only promote MinerU "title" blocks when the wording is actually a unit/chapter/lesson.
         if content_type == "unit_title" and inferred.get("unit"):
