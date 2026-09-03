@@ -2,36 +2,62 @@
 
 Textbook ingestion platform for Arabic and mixed-language school books.
 
-## How the project runs
+Admins upload PDFs locally, extract pages with **Ollama** or **Codex**, and publish structured content to students through a **remote API** backed by PostgreSQL and OpenSearch.
 
-Three layers — **what runs in Docker** vs **what runs on your Mac**:
+---
+
+## Architecture
+
+### Security boundary
+
+| Component | PostgreSQL / OpenSearch | How data is stored |
+|-----------|-------------------------|-------------------|
+| **infra** (Docker) | Hosts Postgres + OpenSearch | — |
+| **remoteLessonsGPT** (Docker) | **Only service with direct access** | Auth, catalog, search, ingest |
+| **extractorLessonsGPT** (host) | **No direct access** | Local PDFs + job files on disk; pages sent via HTTP ingest |
+| **adminLessonsGPT** (host) | **No direct access** | UI only; calls remote + extractor APIs |
+
+The extractor and admin UI must never receive `DATABASE_URL` or `OPENSEARCH_URL`. All persistence for students goes through authenticated remote APIs.
+
+### What runs where
 
 | Layer | What | Where | Why |
 |-------|------|-------|-----|
-| **1. Infrastructure** | Postgres, OpenSearch, OpenSearch Dashboards, pgAdmin | **Docker** | Shared DB and search index (same as production) |
-| **2. remoteLessonsGPT** | Production API (auth, catalog, ingest, workers) | **Docker** | Mimics production deployment |
-| **3. extractorLessonsGPT + adminLessonsGPT** | PDF extraction + admin UI | **Your machine (not Docker)** | Direct access to **Ollama** and **Codex** installed locally |
+| **1. Infrastructure** | Postgres, OpenSearch, Dashboards, pgAdmin | **Docker** (`infra/`) | Shared DB and search (production-like) |
+| **2. remoteLessonsGPT** | Auth, catalog, ingest, workers | **Docker** | Production API; sole DB/OS client |
+| **3. extractor + admin** | PDF extraction + admin UI | **Your Mac** | Needs local Ollama / Codex |
 
 ```
-┌─ Docker: infrastructure (infra/docker-compose.yml) ─────────────────────┐
+┌─ Docker: infra/ ───────────────────────────────────────────────────────┐
 │  Postgres :5432  │  OpenSearch :9200  │  Dashboards :5601  │  pgAdmin :5050 │
-└────────────────────────────────────┬──────────────────────────────────────┘
-                                     │  (only remote API connects here)
-┌─ Docker: remote API (local-lessons-gpt/docker-compose.apps.yml) ────────┐
-│  remoteLessonsGPT  :8081  →  Postgres + OpenSearch via secure APIs       │
-└────────────────────────────────────┬──────────────────────────────────────┘
+└────────────────────────────────────┬─────────────────────────────────────┘
+                                     │  (remote API only)
+┌─ Docker: local-lessons-gpt/docker-compose.apps.yml ─────────────────────┐
+│  remoteLessonsGPT :8081  →  Postgres + OpenSearch                         │
+└────────────────────────────────────┬─────────────────────────────────────┘
                                      │  REMOTE_API_URL=http://localhost:8081
-┌─ Your Mac (host) ──────────────────┴───────────────────────────────────┐
-│  extractorLessonsGPT :8080  (Ollama/Codex, file store, remote ingest)   │
-│  adminLessonsGPT :5173  → remote (auth/catalog/search) + extractor      │
-└──────────────────────────────────────────────────────────────────────────┘
+┌─ Your Mac (host) ──────────────────┴─────────────────────────────────────┐
+│  extractorLessonsGPT :8080   local PDFs, jobs, Ollama/Codex               │
+│  adminLessonsGPT :5173       → :8081 auth/catalog/search                    │
+│                              → :8080 PDF upload, jobs, SSE                  │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Admin API routing
+
+| Admin action | Backend | Dev proxy |
+|--------------|---------|-----------|
+| Login, catalog, search, admin users | remoteLessonsGPT `:8081` | `/remote-api` |
+| PDF upload, jobs, progress stream | extractorLessonsGPT `:8080` | `/api` |
+
+---
 
 ## Monorepo packages
 
-| Product name | Folder | Port | Runs in |
-|--------------|--------|------|---------|
-| **localLessonsGPT** | [local-lessons-gpt/](local-lessons-gpt/) | — | Docker CLI only |
+| Product | Folder | Port | Runs in |
+|---------|--------|------|---------|
+| **infra** | [infra/](infra/) | 5432, 9200, … | Docker |
+| **localLessonsGPT** | [local-lessons-gpt/](local-lessons-gpt/) | — | Docker CLI |
 | **remoteLessonsGPT** | [remote-lessons-gpt/](remote-lessons-gpt/) | 8081 | Docker |
 | **extractorLessonsGPT** | [extractor-lessons-gpt/](extractor-lessons-gpt/) | 8080 | Host |
 | **adminLessonsGPT** | [admin-lessons-gpt/](admin-lessons-gpt/) | 5173 | Host |
@@ -42,34 +68,49 @@ Naming: folders `kebab-case`, Python `snake_case`, docs `camelCase` (e.g. remote
 
 ## Prerequisites
 
-Install on your Mac before starting:
-
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (running)
 - **Python 3.11–3.13** (not 3.14)
 - **Node.js 20+**
-- **[Ollama](https://ollama.com)** — for local VLM extraction (`qwen2.5vl:7b`)
-- **ChatGPT.app** (optional) — for Codex extraction at `/Applications/ChatGPT.app/Contents/Resources/codex`
+- **[Ollama](https://ollama.com)** — local VLM (`qwen2.5vl:7b`)
+- **ChatGPT.app** (optional) — Codex at `/Applications/ChatGPT.app/Contents/Resources/codex`
 
 ---
 
 ## Step-by-step: run the full stack
 
-All commands assume you cloned the repo and are at its root (`lessons-gpt-v3/`).
+All commands assume the repo root is `lessons-gpt-v3/`.
 
-### Step 0 — One-time CLI setup
+### Step 0 — One-time env setup
+
+Each package has its own `.env`. Copy the examples once:
 
 ```bash
+# Docker orchestration (port mapping only)
 cd local-lessons-gpt
-cp .env.example .env                    # optional: REMOTE_API_HOST_PORT only
-cp ../remote-lessons-gpt/.env.example ../remote-lessons-gpt/.env
+cp .env.example .env
 chmod +x scripts/local scripts/start-dev.sh
+
+# Remote API (auth, Postgres, OpenSearch, workers) — required for Docker apps
+cp ../remote-lessons-gpt/.env.example ../remote-lessons-gpt/.env
+
+# Local extractor (Ollama/Codex + REMOTE_API_URL)
+cp ../extractor-lessons-gpt/.env.example ../extractor-lessons-gpt/.env
+
+# Admin UI (dual API proxies — leave VITE_* empty for dev)
+cp ../admin-lessons-gpt/.env.example ../admin-lessons-gpt/.env
 ```
+
+Edit `extractor-lessons-gpt/.env` and set:
+
+```env
+REMOTE_API_URL=http://localhost:8081
+```
+
+Auth credentials (`JWT_SECRET`, `SUPER_ADMIN_*`) live in **`remote-lessons-gpt/.env`** only.
 
 ---
 
 ### Step 1 — Start infrastructure (Docker)
-
-Postgres, OpenSearch, OpenSearch Dashboards, and pgAdmin.
 
 ```bash
 cd local-lessons-gpt
@@ -78,24 +119,18 @@ cd local-lessons-gpt
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| Postgres | `localhost:5432` | user `postgres`, password `postgres`, database `lessons_gpt` |
+| Postgres | `localhost:5432` | `postgres` / `postgres`, db `lessons_gpt` |
 | OpenSearch | http://localhost:9200 | no auth (local dev) |
 | OpenSearch Dashboards | http://localhost:5601 | |
 | pgAdmin | http://localhost:5050 | `admin@lessonsgpt.local` / `admin` |
 
-**pgAdmin:** add server → Host `postgres`, Port `5432`, Username `postgres`, Password `postgres`.
-
-Check status:
-
-```bash
-./scripts/local status
-```
+In pgAdmin, add server: Host `postgres`, Port `5432`, User `postgres`, Password `postgres`.
 
 ---
 
 ### Step 2 — Start remoteLessonsGPT (Docker)
 
-Production API container — uses the infra from Step 1.
+Requires Step 1 and `remote-lessons-gpt/.env`.
 
 ```bash
 cd local-lessons-gpt
@@ -104,94 +139,61 @@ cd local-lessons-gpt
 
 API docs: http://localhost:8081/docs
 
-This builds and runs the same API image used in production, connected to Docker Postgres and OpenSearch.
-
-Shortcut (Steps 1 + 2 together):
+Shortcut (Steps 1 + 2):
 
 ```bash
 cd local-lessons-gpt
-./scripts/start-dev.sh
-# equivalent to: ./scripts/local up all
+./scripts/start-dev.sh    # same as ./scripts/local up all
 ```
 
 ---
 
-### Step 3 — Start extractorLessonsGPT (on your Mac)
+### Step 3 — Start extractorLessonsGPT (host)
 
-**Do not run the extractor in Docker** — it must call Ollama and Codex on your machine.
-
-**One-time setup:**
+**Do not run the extractor in Docker** — it needs Ollama/Codex on your machine.
 
 ```bash
 cd extractor-lessons-gpt
-cp .env.example .env
-```
-
-Edit `.env` and set at minimum:
-
-```env
-REMOTE_API_URL=http://localhost:8081
-EXTRACTOR_BACKEND=local
-VLM_BASE_URL=http://localhost:11434/v1
-VLM_MODEL=qwen2.5vl:7b
-```
-
-The extractor stores PDFs and job state on disk only. It publishes pages to the remote API — **no direct PostgreSQL or OpenSearch access**.
-
-```bash
 python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -U pip && pip install -r requirements.txt
 ollama pull qwen2.5vl:7b
-```
-
-**Every time (new terminal):**
-
-```bash
-cd extractor-lessons-gpt
-source .venv/bin/activate
 python run_api.py
 ```
 
 Extractor API: http://localhost:8080/docs
 
-For **Codex** instead of Ollama, set `EXTRACTOR_BACKEND=codex` in `.env` (ChatGPT.app must be installed).
+- Stores PDFs and jobs under `API_DATA_ROOT` (default `./data`) on disk
+- Publishes each extracted page to `REMOTE_API_URL` via secure ingest API
+- For Codex: set `EXTRACTOR_BACKEND=codex` in `.env`
 
 ---
 
-### Step 4 — Start adminLessonsGPT (on your Mac)
-
-**Do not run the admin UI in Docker** — it talks to the remote API (auth, catalog, search) and the local extractor (PDFs, jobs).
-
-**One-time setup:**
+### Step 4 — Start adminLessonsGPT (host)
 
 ```bash
 cd admin-lessons-gpt
 npm install
-cp .env.example .env
-```
-
-**Every time (new terminal):**
-
-```bash
-cd admin-lessons-gpt
 npm run dev
 ```
 
 Admin UI: http://localhost:5173
 
-Leave `VITE_REMOTE_API_BASE_URL` and `VITE_EXTRACTOR_API_BASE_URL` empty so Vite proxies `/remote-api` → `:8081` and `/api` → `:8080`.
+Leave `VITE_REMOTE_API_BASE_URL` and `VITE_EXTRACTOR_API_BASE_URL` empty — Vite proxies:
+
+- `/remote-api` → remote API `:8081`
+- `/api` → extractor `:8080`
 
 ---
 
 ### Step 5 — Log in and extract a book
 
-1. Open http://localhost:5173/login  
-2. Sign in with **remote** admin credentials (from Docker remote API seed):  
-   - Email: `superadmin@lessonsgpt.com`  
-   - Password: `SuperAdmin123!`  
-3. Pick a catalog subject, upload a PDF, start extraction with **remote sync** enabled.  
-4. Each page is published to remoteLessonsGPT → Postgres + OpenSearch (visible in Dashboards / pgAdmin).
+1. Open http://localhost:5173/login
+2. Sign in with credentials from `remote-lessons-gpt/.env`:
+   - Email: `superadmin@lessonsgpt.com`
+   - Password: `SuperAdmin123!`
+3. Choose a catalog subject (remote API), upload a PDF (extractor), start extraction.
+4. Each page is ingested by remoteLessonsGPT → Postgres + OpenSearch (check Dashboards / pgAdmin).
 
 ---
 
@@ -199,14 +201,14 @@ Leave `VITE_REMOTE_API_BASE_URL` and `VITE_EXTRACTOR_API_BASE_URL` empty so Vite
 
 ```bash
 cd local-lessons-gpt
-./scripts/local down all      # stop remote API + infrastructure
+./scripts/local down all
 ```
 
 Stop extractor and admin with `Ctrl+C` in their terminals.
 
 ---
 
-## Quick reference — all URLs
+## Quick reference — URLs
 
 | Service | URL | Runs in |
 |---------|-----|---------|
@@ -224,36 +226,50 @@ Stop extractor and admin with `Ctrl+C` in their terminals.
 From `local-lessons-gpt/`:
 
 ```bash
-./scripts/local up infra      # Step 1 only
-./scripts/local up apps       # Step 2 only (requires infra)
-./scripts/local up all        # Steps 1 + 2
+./scripts/local up infra      # Postgres + OpenSearch + Dashboards + pgAdmin
+./scripts/local up apps       # remote API (needs infra + remote-lessons-gpt/.env)
+./scripts/local up all        # infra + apps
 ./scripts/local status
-./scripts/local host          # print Step 3 + 4 commands
+./scripts/local host          # print extractor + admin commands
 ./scripts/local down all
 ./scripts/local help
 ```
 
 ---
 
-## Package READMEs
+## Environment files
 
-- [local-lessons-gpt/README.md](local-lessons-gpt/README.md) — Docker compose details
-- [remote-lessons-gpt/README.md](remote-lessons-gpt/README.md) — production API + ingest
-- [extractor-lessons-gpt/README.md](extractor-lessons-gpt/README.md) — Ollama / Codex extraction
-- [admin-lessons-gpt/README.md](admin-lessons-gpt/README.md) — admin UI
+| File | Purpose |
+|------|---------|
+| [infra/](infra/) | Docker compose for Postgres + OpenSearch (no `.env` needed) |
+| [local-lessons-gpt/.env.example](local-lessons-gpt/.env.example) | Docker port mapping (`REMOTE_API_HOST_PORT`) |
+| [remote-lessons-gpt/.env.example](remote-lessons-gpt/.env.example) | Auth, `DATABASE_URL`, `OPENSEARCH_*`, API workers |
+| [extractor-lessons-gpt/.env.example](extractor-lessons-gpt/.env.example) | `REMOTE_API_URL`, Ollama/Codex, local API |
+| [admin-lessons-gpt/.env.example](admin-lessons-gpt/.env.example) | Vite proxy bases for remote + extractor |
+
+When running remote API in Docker, `docker-compose.apps.yml` overrides `DATABASE_URL` and `OPENSEARCH_URL` to Docker hostnames (`postgres`, `opensearch`).
 
 ---
 
-## Key environment variables
+## Key variables (local dev)
 
-| Variable | Used by | Value (local dev) |
-|----------|---------|-------------------|
-| `REMOTE_API_URL` | extractor (host) | `http://localhost:8081` |
-| `DATABASE_URL` | remote API (Docker only) | `postgresql://postgres:postgres@postgres:5432/lessons_gpt` |
-| `OPENSEARCH_URL` | remote API (Docker only) | `http://opensearch:9200` |
-| `VITE_REMOTE_API_BASE_URL` | admin (host) | empty (use Vite proxy `/remote-api`) |
-| `VITE_EXTRACTOR_API_BASE_URL` | admin (host) | empty (use Vite proxy `/api`) |
-| `VLM_BASE_URL` | extractor (host) | `http://localhost:11434/v1` |
-| `CODEX_BIN` | extractor (host) | `/Applications/ChatGPT.app/Contents/Resources/codex` |
+| Variable | Package | Value |
+|----------|---------|-------|
+| `REMOTE_API_URL` | extractor | `http://localhost:8081` |
+| `JWT_SECRET`, `SUPER_ADMIN_*` | remote | in `remote-lessons-gpt/.env` |
+| `DATABASE_URL` | remote (Docker) | set by compose → `postgres:5432` |
+| `OPENSEARCH_URL` | remote (Docker) | set by compose → `opensearch:9200` |
+| `VITE_REMOTE_API_BASE_URL` | admin | empty → `/remote-api` proxy |
+| `VITE_EXTRACTOR_API_BASE_URL` | admin | empty → `/api` proxy |
+| `VLM_BASE_URL` | extractor | `http://localhost:11434/v1` |
+| `CODEX_BIN` | extractor | `/Applications/ChatGPT.app/Contents/Resources/codex` |
 
-See [remote-lessons-gpt/.env.example](remote-lessons-gpt/.env.example), [extractor-lessons-gpt/.env.example](extractor-lessons-gpt/.env.example), and [local-lessons-gpt/.env.example](local-lessons-gpt/.env.example) (Docker port only).
+---
+
+## Package READMEs
+
+- [infra/README.md](infra/README.md) — Postgres + OpenSearch Docker stack
+- [local-lessons-gpt/README.md](local-lessons-gpt/README.md) — Docker orchestration CLI
+- [remote-lessons-gpt/README.md](remote-lessons-gpt/README.md) — production API + ingest
+- [extractor-lessons-gpt/README.md](extractor-lessons-gpt/README.md) — Ollama / Codex extraction
+- [admin-lessons-gpt/README.md](admin-lessons-gpt/README.md) — admin UI
