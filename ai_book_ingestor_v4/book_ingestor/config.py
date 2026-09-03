@@ -32,6 +32,26 @@ class Settings(BaseSettings):
     include_neighbor_page_text: bool = True
     visual_context_chars: int = 10000
 
+    # MinerU document parser: https://github.com/opendatalab/mineru
+    # pipeline backend is CPU/MPS friendly and uses a dedicated Arabic OCR model.
+    mineru_enabled: bool = True
+    mineru_required: bool = False
+    mineru_api_url: str = ""
+    mineru_backend: str = "pipeline"
+    mineru_parse_method: str = "auto"
+    mineru_language: str = "arabic"
+    mineru_effort: str = "medium"
+    mineru_formula_enable: bool = True
+    mineru_table_enable: bool = True
+    mineru_image_analysis: bool = True
+    mineru_timeout_seconds: int = 3600
+    mineru_poll_seconds: float = 2.0
+    mineru_model_source: str = ""
+    mineru_text_chars: int = 16000
+    ocr_min_chars: int = 20
+    ocr_retry_empty: bool = True
+    vlm_page_extraction_enabled: bool = True
+
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     api_data_root: str = "./data"

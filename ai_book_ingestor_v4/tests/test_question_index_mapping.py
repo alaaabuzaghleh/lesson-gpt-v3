@@ -21,3 +21,7 @@ def test_question_fields_are_searchable_in_opensearch_mapping():
     assert props["question_scope"]["type"] == "keyword"
     assert props["question_group"]["fields"]["ar"]["analyzer"] == "arabic"
     assert props["question_group"]["fields"]["en"]["analyzer"] == "english"
+    assert "ocr_text" in props
+    assert props["ocr_text"]["fields"]["ar"]["analyzer"] == "arabic"
+    assert props["ocr_source"]["type"] == "keyword"
+    assert props["text_source"]["type"] == "keyword"

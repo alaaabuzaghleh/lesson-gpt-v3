@@ -38,16 +38,42 @@ Rules:
 PAGE_SYSTEM = """You are a high-precision educational document understanding engine for Arabic and English textbooks. Your task is PAGE SEGMENTATION AND VERBATIM EXTRACTION, not teaching and not deep visual interpretation. Extract only visible evidence. Never solve questions, invent labels, infer missing answers, translate source wording, or add external knowledge. Return strict JSON only."""
 
 
-def page_prompt(pdf_page_number: int, text_layer: str, book_meta: dict) -> str:
+def page_prompt(
+    pdf_page_number: int,
+    text_layer: str,
+    book_meta: dict,
+    *,
+    text_source: str = "pdf",
+    structured_blocks: str | None = None,
+    text_limit: int = 16000,
+) -> str:
     meta = json.dumps(book_meta, ensure_ascii=False)
+    if text_source == "mineru":
+        text_header = (
+            "MinerU reading-order extract (high-accuracy OCR/layout with header/footer removal; "
+            "formulas may be LaTeX and tables may be HTML). The page image remains authoritative "
+            "if the extract and image disagree:"
+        )
+    else:
+        text_header = "PDF text layer (may be incomplete, reordered, or empty; page image is authoritative):"
+    structured = ""
+    if structured_blocks and structured_blocks.strip():
+        structured = f"""
+
+MinerU structured blocks (types, captions, tables, formulas, bboxes on a 0..1000 page grid). Use these as layout/text hints, not as a closed taxonomy:
+---BEGIN MINERU BLOCKS---
+{structured_blocks[:12000]}
+---END MINERU BLOCKS---
+"""
     return f"""
 PDF page number: {pdf_page_number}
 Known/overridden book metadata: {meta}
 
-PDF text layer (may be incomplete, reordered, or empty; page image is authoritative):
+{text_header}
 ---BEGIN TEXT LAYER---
-{text_layer[:8000]}
+{text_layer[:text_limit]}
 ---END TEXT LAYER---
+{structured}
 
 Extract every educationally meaningful visible block in natural reading order.
 Allowed content_type values:
@@ -129,6 +155,7 @@ Rules:
 10. Preserve mathematical notation, Arabic punctuation, Latin symbols, units, superscripts/subscripts as faithfully as possible.
 11. page_language can be ar, en, mixed, or another visible language.
 12. confidence is extraction confidence, not truth probability.
+13. When a MinerU extract is supplied, prefer its reading order, LaTeX, and table HTML when they match the page image. Do not copy MinerU types blindly; map to the allowed content_type list. If MinerU missed a visible question or visual, still extract it from the image.
 """
 
 

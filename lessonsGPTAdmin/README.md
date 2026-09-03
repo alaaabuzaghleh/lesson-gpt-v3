@@ -4,39 +4,77 @@ Arabic RTL admin dashboard for the **AI Book Ingestor v4** REST API.
 
 Manage the catalog hierarchy (country → education system → grade → subject), upload textbooks, monitor extraction jobs with live SSE progress, and search indexed content.
 
-## Prerequisites
+## How to run frontend and backend
 
-- Node.js 20+
-- PostgreSQL running (via Docker Compose in `ai_book_ingestor_v4`)
-- [AI Book Ingestor API](../ai_book_ingestor_v4/) running on `http://localhost:8080`
-- OpenSearch (optional, for search features)
+Use Docker for **Postgres** and **OpenSearch** only. Run MinerU, the API, and this UI on the host.
 
-## Quick start
+Python **3.11–3.13** is required for the API + MinerU (3.14 is not supported).
+
+### 1. Postgres + OpenSearch
 
 ```bash
-# Terminal 1 — PostgreSQL + OpenSearch
 cd ai_book_ingestor_v4
-docker compose up postgres opensearch -d
+docker compose up -d postgres opensearch dashboards
+```
 
-# Terminal 2 — API
+| Service | URL |
+|---------|-----|
+| Postgres | `localhost:5432` / `lessons_gpt` / `postgres` / `postgres` |
+| OpenSearch | http://localhost:9200 |
+| Dashboards | http://localhost:5601 |
+
+### 2. Backend `.env` and Python env
+
+`ai_book_ingestor_v4/.env` is already configured for those Compose services and MinerU at `http://127.0.0.1:8000`. Recreate it with `cp .env.example .env` if needed.
+
+```bash
+cd ai_book_ingestor_v4
+python3.13 -m venv .venv
 source .venv/bin/activate
+pip install -U pip
 pip install -r requirements.txt
-python run_api.py
+pip install "mineru[pipeline]"
+```
 
-# Terminal 3 — Admin UI
+### 3. MinerU
+
+```bash
+cd ai_book_ingestor_v4
+source .venv/bin/activate
+mineru-api --host 127.0.0.1 --port 8000
+```
+
+http://127.0.0.1:8000/health
+
+### 4. Book ingestion API
+
+```bash
+cd ai_book_ingestor_v4
+source .venv/bin/activate
+python run_api.py
+```
+
+http://localhost:8080/docs
+
+### 5. Admin UI
+
+```bash
 cd lessonsGPTAdmin
+cp .env.example .env
 npm install
 npm run dev
 ```
 
 Open **http://localhost:5173/login**
 
-Default super admin (from `.env`):
-
 | Field | Value |
 |-------|-------|
 | Email | `superadmin@lessonsgpt.com` |
 | Password | `SuperAdmin123!` |
+
+`lessonsGPTAdmin/.env` should keep `VITE_API_BASE_URL` empty so Vite proxies `/api` and `/health` to `http://localhost:8080`.
+
+Page extraction also needs a local VLM (Ollama by default): `ollama pull qwen2.5vl:7b` and `ollama serve`.
 
 Only **admin** and **super_admin** roles can sign in. **super_admin** can create additional admin users from the Admins page.
 

@@ -39,8 +39,9 @@ completed
 ### Processing stages exposed by the API
 
 ```text
-metadata
-  -> page_extraction
+mineru_parse + ocr_index   # page-by-page MinerU OCR into OpenSearch, with resume checkpoints
+  -> metadata
+  -> page_extraction       # skipped when --ocr-only / VLM_PAGE_EXTRACTION_ENABLED=false
   -> question_intelligence
   -> visual_analysis
   -> artifact_generation
@@ -50,32 +51,126 @@ metadata
   -> completed
 ```
 
-### Run the API locally
+### Run the stack locally (backend + MinerU + admin UI)
+
+Use Docker only for **Postgres** and **OpenSearch**. Run the API, MinerU, and the admin dashboard on the host.
+
+Python **3.11–3.13** is required (MinerU does not support 3.14). On macOS with Homebrew: `brew install python@3.13`.
+
+#### 1. Start Postgres and OpenSearch
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+cd ai_book_ingestor_v4
+docker compose up -d postgres opensearch dashboards
+```
+
+Wait until Postgres is healthy (`docker compose ps`). Services:
+
+| Service | URL |
+|---------|-----|
+| Postgres | `localhost:5432` database `lessons_gpt` (user/password `postgres`) |
+| OpenSearch | http://localhost:9200 |
+| Dashboards | http://localhost:5601 |
+
+#### 2. Create `.env` and the Python environment
+
+A local `.env` is already in this folder and points at those Compose services plus MinerU on port 8000. To recreate it:
+
+```bash
 cp .env.example .env
+```
+
+Then set:
+
+```env
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/lessons_gpt
+OPENSEARCH_URL=http://localhost:9200
+MINERU_API_URL=http://127.0.0.1:8000
+MINERU_BACKEND=pipeline
+MINERU_LANGUAGE=arabic
+```
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt
+pip install "mineru[pipeline]"
+```
+
+`mineru[pipeline]` is enough for CPU / Apple Silicon. Use `mineru[all]` only if you will run `hybrid-engine` on a GPU.
+
+#### 3. Seed the Saudi catalog
+
+Postgres must be up. From `ai_book_ingestor_v4` with the venv active:
+
+```bash
+source .venv/bin/activate
+python -m scripts.seed_catalog_seo
+```
+
+This upserts **Saudi Arabia only** (`SA` / السعودية) and these education systems:
+
+- النظام الوطني
+- النظام الدولي الامريكي
+- النظام الدولي البريطاني
+- البكالوريا الدولية
+
+It also deactivates any other country or leftover education system. Re-run the same command after changing the seed file. Expected output looks like:
+
+```text
+Seeded catalog: 1 countries, 4 systems, 55 grades, 356 subjects (created or updated).
+```
+
+#### 4. Start MinerU
+
+```bash
+source .venv/bin/activate
+mineru-api --host 127.0.0.1 --port 8000
+```
+
+Docs: http://127.0.0.1:8000/docs — health: http://127.0.0.1:8000/health
+
+The first request downloads OCR/layout models (several GB). If Hugging Face is blocked, set `MINERU_MODEL_SOURCE=modelscope` in `.env` before starting.
+
+#### 5. Start the book ingestion API
+
+In a second terminal:
+
+```bash
+cd ai_book_ingestor_v4
+source .venv/bin/activate
 python run_api.py
 ```
 
-The service listens on:
+| | |
+|---|---|
+| API | http://localhost:8080 |
+| OpenAPI UI | http://localhost:8080/docs |
+| OpenAPI JSON | http://localhost:8080/openapi.json |
 
-```text
-http://localhost:8080
+Default super admin: `superadmin@lessonsgpt.com` / `SuperAdmin123!`
+
+#### 6. Start the admin frontend
+
+In a third terminal:
+
+```bash
+cd lessonsGPTAdmin
+cp .env.example .env
+npm install
+npm run dev
 ```
 
-Interactive OpenAPI documentation is available at:
+Open **http://localhost:5173/login** and sign in with the super-admin credentials above.
 
-```text
-http://localhost:8080/docs
-```
+The Vite dev server proxies `/api` and `/health` to `http://localhost:8080`. Leave `VITE_API_BASE_URL` empty in `lessonsGPTAdmin/.env` for local development.
 
-and the raw OpenAPI schema at:
+You also need a vision model for page extraction (Ollama by default):
 
-```text
-http://localhost:8080/openapi.json
+```bash
+ollama pull qwen2.5vl:7b
+ollama serve
 ```
 
 ### REST workflow
@@ -87,7 +182,7 @@ http://localhost:8080/openapi.json
 ```bash
 curl -X POST http://localhost:8080/api/v1/books \
   -F 'file=@./books/science-grade-8.pdf' \
-  -F 'metadata={"country":"Jordan","curriculum":"Jordan National Curriculum","grade":"Grade 8","subject":"Science","language":"ar"}'
+  -F 'metadata={"country":"Saudi Arabia","curriculum":"National System","grade":"First Intermediate","subject":"Science","language":"ar"}'
 ```
 
 Example response:
@@ -99,8 +194,8 @@ Example response:
   "size_bytes": 23144231,
   "sha256": "...",
   "metadata": {
-    "country": "Jordan",
-    "grade": "Grade 8",
+    "country": "Saudi Arabia",
+    "grade": "First Intermediate",
     "subject": "Science"
   },
   "created_at": "2026-08-30T...+00:00"
@@ -275,11 +370,12 @@ Persistent book uploads, job state and extraction artifacts are stored in the `b
 
 ## What this version does
 
-Every PDF is processed in two layers:
+Every PDF is processed in these layers:
 
-1. **Page understanding** — detects headings, lessons, text, definitions, theories, laws, examples, questions, activities, tables, images, maps, diagrams, charts and other meaningful page blocks.
-2. **Question Intelligence** — every question is normalized to a universal question schema that separates where it appears (`scope`) from how it is answered (`format`), why it is asked (`purpose`), Bloom level, dependencies, and compound subquestions. Arabic and English review/checkpoint headings are recognized, and neighboring lesson/chapter/unit boundaries are used as deterministic evidence.
-3. **Universal visual understanding** — every detected visual asset is cropped and sent through a second high-resolution VLM pass. The visual analyzer uses an **open-ended `visual_type`** rather than forcing every image into biology/geography/etc.
+1. **MinerU document parse** — reconstructs reading order, OCR, formulas, and tables before any VLM call.
+2. **Page understanding** — detects headings, lessons, text, definitions, theories, laws, examples, questions, activities, tables, images, maps, diagrams, charts and other meaningful page blocks.
+3. **Question Intelligence** — every question is normalized to a universal question schema that separates where it appears (`scope`) from how it is answered (`format`), why it is asked (`purpose`), Bloom level, dependencies, and compound subquestions. Arabic and English review/checkpoint headings are recognized, and neighboring lesson/chapter/unit boundaries are used as deterministic evidence.
+4. **Universal visual understanding** — every detected visual asset is cropped and sent through a second high-resolution VLM pass. The visual analyzer uses an **open-ended `visual_type`** rather than forcing every image into biology/geography/etc.
 
 A final optional pass **verifies every visual extraction** and automatically retries material errors.
 
@@ -421,14 +517,85 @@ The model is instructed to distinguish **visible evidence** from **context-deriv
 
 ---
 
+## MinerU document parsing
+
+Page text no longer comes from the raw PDF text layer alone. The pipeline first runs **[MinerU](https://github.com/opendatalab/mineru)** so the VLM receives reading-order OCR, header/footer removal, LaTeX formulas, and HTML tables. That is the main accuracy gain for Arabic textbooks, scanned pages, and multi-column layouts.
+
+MinerU OCR is indexed into OpenSearch immediately after parsing: one `ocr_page` document per page plus one `ocr_block` per layout block (`text`, `table`, `equation`, `image`, …). Those records are searchable even if the later VLM page pass fails. Search also matches the `ocr_text` field.
+
+The VLM still does educational segmentation (questions, hierarchy, visual regions). MinerU is the document parser; the VLM remains the textbook-understanding layer.
+
+Default backend is `pipeline`: it runs on CPU or Apple Silicon, avoids VLM hallucination, and uses MinerU's dedicated Arabic OCR model (`arabic`, which also covers English).
+
+### Install MinerU locally
+
+```bash
+pip install -U "mineru[all]"
+# or: pip install -e .[mineru]
+```
+
+First parse downloads layout/OCR models. If Hugging Face is blocked:
+
+```env
+MINERU_MODEL_SOURCE=modelscope
+```
+
+On machines without a GPU, keep the default:
+
+```env
+MINERU_BACKEND=pipeline
+MINERU_LANGUAGE=arabic
+```
+
+On a GPU host you can switch to higher-accuracy hybrid parsing:
+
+```env
+MINERU_BACKEND=hybrid-engine
+MINERU_EFFORT=medium
+```
+
+### Use a remote MinerU API (recommended in Docker)
+
+Do not bake MinerU into the API image — the models are large. Run `mineru-api` on a host or GPU box and point the ingestor at it:
+
+```env
+MINERU_API_URL=http://host.docker.internal:8000
+```
+
+```bash
+mineru-api --host 0.0.0.0 --port 8000
+```
+
+Official Docker deployment notes: https://opendatalab.github.io/MinerU/quick_start/docker_deployment/
+
+If MinerU is unavailable and `MINERU_REQUIRED=false` (default), the pipeline logs a warning and falls back to the PyMuPDF text layer.
+
+```env
+MINERU_ENABLED=true
+MINERU_REQUIRED=false
+MINERU_API_URL=http://127.0.0.1:8000
+MINERU_BACKEND=pipeline
+MINERU_PARSE_METHOD=auto
+MINERU_LANGUAGE=arabic
+MINERU_TIMEOUT_SECONDS=3600
+```
+
+---
+
 ## Architecture
 
 ```text
 PDF textbook
     |
+    +--> MinerU parse (pipeline / hybrid / remote API)
+    |       |
+    |       +--> reading-order OCR (Arabic + English)
+    |       +--> formulas as LaTeX, tables as HTML
+    |       +--> layout blocks + 0..1000 bboxes
+    |
     +--> Render every page at high resolution
     |       |
-    |       +--> PDF text layer (when available)
+    |       +--> MinerU text (fallback: PDF text layer)
     |       +--> Full page image
     |
     +--> PAGE PASS (VLM)
@@ -544,6 +711,18 @@ python main.py ingest ./books/science8.pdf \
   --semester "الفصل الأول"
 ```
 
+To store every page's OCR in OpenSearch first (and resume from the last finished page after a stop/crash):
+
+```bash
+python main.py ingest ./books/math.pdf \
+  --output ./output/math \
+  --language ar \
+  --ocr-only \
+  --index
+```
+
+Re-run the same command to continue from `checkpoint.json`. Add VLM educational extraction later by omitting `--ocr-only` (already-indexed OCR pages are kept).
+
 ## Ingest an English book
 
 ```bash
@@ -564,6 +743,8 @@ Metadata options are overrides. When omitted, the VLM tries to detect them from 
 
 ```text
 output/book/
+├── mineru/                   # legacy whole-book MinerU cache (if present)
+├── mineru_pages/page_NNNN/   # per-page MinerU OCR cache (resume)
 ├── pages/                    # full rendered pages
 ├── raw/                      # raw page VLM JSON
 ├── extracted_pages/          # validated page extractions
@@ -571,6 +752,7 @@ output/book/
 ├── asset_analysis/           # deep structured visual JSON
 ├── asset_verification/       # visual verifier JSON
 ├── index/documents.jsonl     # OpenSearch-ready records
+├── checkpoint.json           # resume cursor (ocr_pages / indexed_pages)
 ├── book_metadata.final.json
 ├── quality_report.json
 ├── manifest.json

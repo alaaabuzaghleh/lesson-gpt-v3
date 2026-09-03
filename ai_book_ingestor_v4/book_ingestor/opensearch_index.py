@@ -84,6 +84,9 @@ INDEX_BODY = {
             "text": MULTILINGUAL_TEXT,
             "normalized_text": {"type": "text"},
             "search_text": MULTILINGUAL_TEXT,
+            "ocr_text": MULTILINGUAL_TEXT,
+            "ocr_source": {"type": "keyword"},
+            "text_source": {"type": "keyword"},
             "concepts": MULTILINGUAL_TEXT_RAW,
             "keywords": MULTILINGUAL_TEXT_RAW,
             "aliases": MULTILINGUAL_TEXT,
@@ -140,9 +143,14 @@ INDEX_BODY = {
 
 def ensure_index(client, index_name: str, recreate: bool = False):
     if client.indices.exists(index=index_name):
-        if not recreate:
+        if recreate:
+            client.indices.delete(index=index_name)
+        else:
+            client.indices.put_mapping(
+                index=index_name,
+                body={"properties": INDEX_BODY["mappings"]["properties"]},
+            )
             return
-        client.indices.delete(index=index_name)
     client.indices.create(index=index_name, body=INDEX_BODY)
 
 

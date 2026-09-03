@@ -27,6 +27,8 @@ class JobCheckpoint:
     metadata: dict[str, Any] = field(default_factory=dict)
     extracted_pages: list[int] = field(default_factory=list)
     indexed_pages: list[int] = field(default_factory=list)
+    ocr_pages: list[int] = field(default_factory=list)
+    mineru_pages: list[int] = field(default_factory=list)
     failed_pages: list[int] = field(default_factory=list)
     extracted_records: int = 0
     indexed_records: int = 0
@@ -49,6 +51,18 @@ class JobCheckpoint:
             self.indexed_pages.append(int(page_no))
         self.indexed_pages = _unique_sorted(self.indexed_pages)
 
+    def mark_ocr(self, page_no: int) -> None:
+        if page_no not in self.ocr_pages:
+            self.ocr_pages.append(int(page_no))
+        self.ocr_pages = _unique_sorted(self.ocr_pages)
+        if page_no in self.failed_pages:
+            self.failed_pages = [p for p in self.failed_pages if p != int(page_no)]
+
+    def mark_mineru(self, page_no: int) -> None:
+        if page_no not in self.mineru_pages:
+            self.mineru_pages.append(int(page_no))
+        self.mineru_pages = _unique_sorted(self.mineru_pages)
+
     def mark_failed(self, page_no: int) -> None:
         if page_no not in self.failed_pages:
             self.failed_pages.append(int(page_no))
@@ -58,6 +72,8 @@ class JobCheckpoint:
         data = asdict(self)
         data["extracted_pages"] = _unique_sorted(self.extracted_pages)
         data["indexed_pages"] = _unique_sorted(self.indexed_pages)
+        data["ocr_pages"] = _unique_sorted(self.ocr_pages)
+        data["mineru_pages"] = _unique_sorted(self.mineru_pages)
         data["failed_pages"] = _unique_sorted(self.failed_pages)
         data["updated_at"] = _utcnow()
         return data
@@ -77,7 +93,7 @@ class JobCheckpoint:
         if not data:
             return cls()
         known = {k: data[k] for k in cls.__dataclass_fields__ if k in data}
-        for key in ("extracted_pages", "indexed_pages", "failed_pages"):
+        for key in ("extracted_pages", "indexed_pages", "ocr_pages", "mineru_pages", "failed_pages"):
             if key in known and known[key] is not None:
                 known[key] = [int(v) for v in known[key]]
         return cls(**known)
@@ -96,7 +112,12 @@ class JobCheckpoint:
     def load_or_new(cls, path: str | Path) -> JobCheckpoint:
         return cls.load(path) or cls()
 
-    def hydrate_from_artifacts(self, extracted_dir: str | Path, jsonl_path: str | Path) -> None:
+    def hydrate_from_artifacts(
+        self,
+        extracted_dir: str | Path,
+        jsonl_path: str | Path,
+        mineru_pages_dir: str | Path | None = None,
+    ) -> None:
         """Fill gaps from page JSON and documents.jsonl after a crash that skipped checkpoint writes."""
         extracted_dir = Path(extracted_dir)
         if extracted_dir.exists():
@@ -106,6 +127,18 @@ class JobCheckpoint:
                 except (IndexError, ValueError):
                     continue
                 self.mark_extracted(page_no)
+
+        if mineru_pages_dir:
+            pages_root = Path(mineru_pages_dir)
+            if pages_root.exists():
+                for folder in pages_root.glob("page_*"):
+                    if not folder.is_dir():
+                        continue
+                    try:
+                        page_no = int(folder.name.split("_")[1])
+                    except (IndexError, ValueError):
+                        continue
+                    self.mark_mineru(page_no)
 
         jsonl_path = Path(jsonl_path)
         if not jsonl_path.exists():

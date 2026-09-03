@@ -1,4 +1,7 @@
 pymupdf>=1.24.0
+# Optional: high-accuracy PDF parser. Large install (torch + OCR models).
+# pip install "mineru[all]"
+# Or run mineru-api separately and set MINERU_API_URL.
 Pillow>=10.0.0
 httpx>=0.27.0
 pydantic>=2.7.0

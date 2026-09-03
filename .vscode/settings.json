@@ -1,0 +1,11 @@
+{
+  "files.exclude": {
+    "ai_book_ingestor_v4/output": true,
+    "ai_book_ingestor_v4/books": true
+  },
+  "search.exclude": {
+    "ai_book_ingestor_v4/output": true,
+    "ai_book_ingestor_v4/books": true
+  },
+  "explorer.excludeGitIgnore": true
+}

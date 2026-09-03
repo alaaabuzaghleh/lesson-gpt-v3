@@ -79,6 +79,7 @@ class ContentType(str, Enum):
     RUBRIC = "rubric"
     GLOSSARY = "glossary"
     INDEX = "index"
+    OCR_PAGE = "ocr_page"
     OTHER = "other"
 
 
@@ -120,6 +121,8 @@ CONTENT_TYPE_ALIASES = {
     "list": "explanation",
     "bullet": "explanation",
     "bullets": "explanation",
+    "ocr": "ocr_page",
+    "ocr_page": "ocr_page",
 }
 
 
@@ -512,6 +515,9 @@ class IndexDocument(BaseModel):
     text: str = ""
     normalized_text: str = ""
     search_text: str = ""
+    ocr_text: str = ""
+    ocr_source: Optional[str] = None
+    text_source: Optional[str] = None
 
     concepts: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)

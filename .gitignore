@@ -17,6 +17,10 @@ ENV/
 
 # Runtime data (uploads, job DB, extraction artifacts)
 ai_book_ingestor_v4/data/
+ai_book_ingestor_v4/output/
+ai_book_ingestor_v4/books/
+output/
+books/
 
 # Testing / type checking
 .pytest_cache/
@@ -34,7 +38,8 @@ build/
 
 # IDE / OS
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 *.swp
 *.swo
 .DS_Store

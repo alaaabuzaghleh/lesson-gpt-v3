@@ -35,6 +35,7 @@ def ingest(
     resume: bool = typer.Option(True, "--resume/--no-resume"),
     index: bool = typer.Option(True, "--index/--no-index", help="Index extracted records into OpenSearch"),
     recreate_index: bool = typer.Option(False, help="Delete and recreate the OpenSearch index"),
+    ocr_only: bool = typer.Option(False, "--ocr-only", help="Index MinerU/PDF page text only; skip VLM page extraction"),
 ):
     overrides = {
         "country": country,
@@ -55,7 +56,7 @@ def ingest(
 
         os_client = create_client()
         existing = JobCheckpoint.load(checkpoint_path(output)) if resume else None
-        recreate = recreate_index and not (existing and existing.indexed_pages)
+        recreate = recreate_index and not (existing and (existing.indexed_pages or existing.ocr_pages))
         ensure_index(os_client, settings.opensearch_index, recreate=recreate)
 
     def on_page_docs(page_no, docs):
@@ -65,18 +66,31 @@ def ingest(
         from .opensearch_index import bulk_index
 
         success, errors = bulk_index(
-            os_client, settings.opensearch_index, [d.model_dump(mode="json") for d in docs], refresh=False
+            os_client, settings.opensearch_index, [d.model_dump(mode="json") for d in docs], refresh=True
         )
         indexed_records += int(success)
         if errors:
             console.print(f"[red]Bulk errors on page {page_no}:[/red] {len(errors)}")
+            raise RuntimeError(f"OpenSearch reported {len(errors)} bulk errors on page {page_no}")
+
+    def progress(event):
+        page = event.get("current_page")
+        total = event.get("total_pages")
+        stage = event.get("stage") or ""
+        message = event.get("message") or ""
+        if page and total:
+            console.print(f"[cyan]{stage}[/cyan] {page}/{total} {message}")
+        else:
+            console.print(f"[cyan]{stage}[/cyan] {message}")
 
     _, book_id, docs = pipeline.run(
         overrides,
         start_page,
         end_page,
         resume,
+        progress_callback=progress,
         page_docs_callback=on_page_docs if index else None,
+        ocr_only=ocr_only,
     )
 
     console.print(f"[green]Book ID:[/green] {book_id}")

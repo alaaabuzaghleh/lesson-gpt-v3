@@ -79,7 +79,11 @@ class ExtractionWorkerPool:
             checkpoint = JobCheckpoint.load_or_new(checkpoint_path(output))
             if job.get("checkpoint"):
                 checkpoint = JobCheckpoint.from_dict(job["checkpoint"])
-            checkpoint.hydrate_from_artifacts(output / "extracted_pages", output / "index" / "documents.jsonl")
+            checkpoint.hydrate_from_artifacts(
+                output / "extracted_pages",
+                output / "index" / "documents.jsonl",
+                mineru_pages_dir=output / "mineru_pages",
+            )
 
             os_client = None
             indexed_records = int(checkpoint.indexed_records or 0)
@@ -89,7 +93,7 @@ class ExtractionWorkerPool:
                 from ..opensearch_index import bulk_index, create_client, ensure_index
 
                 os_client = create_client()
-                recreate = bool(job["recreate_index"]) and not checkpoint.indexed_pages
+                recreate = bool(job["recreate_index"]) and not (checkpoint.indexed_pages or checkpoint.ocr_pages)
                 ensure_index(os_client, settings.opensearch_index, recreate=recreate)
 
             def progress(event: dict[str, Any]) -> None:
@@ -112,7 +116,7 @@ class ExtractionWorkerPool:
 
                 payloads = [d.model_dump(mode="json") for d in docs]
                 success, errors = bulk_index(
-                    os_client, settings.opensearch_index, payloads, refresh=False
+                    os_client, settings.opensearch_index, payloads, refresh=True
                 )
                 indexed_records += int(success)
                 if errors:
@@ -127,6 +131,7 @@ class ExtractionWorkerPool:
                         message=f"OpenSearch reported {len(errors)} bulk errors on page {page_no}",
                         payload={"page": page_no, "error_count": len(errors)},
                     )
+                    raise RuntimeError(f"OpenSearch reported {len(errors)} bulk errors on page {page_no}")
 
             metadata, book_id, docs = pipeline.run(
                 base_meta,
