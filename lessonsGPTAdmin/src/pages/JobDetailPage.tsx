@@ -187,6 +187,15 @@ export function JobDetailPage() {
           <div><dt>{t.jobDetail.records}</dt><dd>{job.extracted_records ?? t.common.dash}</dd></div>
           <div><dt>{t.jobDetail.visualAssets}</dt><dd>{job.visual_assets ?? t.common.dash}</dd></div>
           <div><dt>{t.jobDetail.indexed}</dt><dd>{job.indexed_records ?? t.common.dash}</dd></div>
+          {job.sync_to_remote && (
+            <div>
+              <dt>النشر البعيد</dt>
+              <dd>
+                {job.remote_sync_status ?? t.common.dash}
+                {job.remote_synced_records != null ? ` · ${job.remote_synced_records}` : ''}
+              </dd>
+            </div>
+          )}
           <div><dt>{t.jobDetail.started}</dt><dd>{formatDate(job.started_at)}</dd></div>
           <div><dt>{t.jobDetail.finished}</dt><dd>{formatDate(job.finished_at)}</dd></div>
           {job.error && <div className="span-full"><dt>{t.jobDetail.error}</dt><dd className="text-danger">{job.error}</dd></div>}

@@ -169,6 +169,7 @@ class JobStore:
             conn.execute(SCHEMA_SQL)
             self._migrate_catalog_seo(conn)
             self._migrate_jobs(conn)
+            self._migrate_book_pages(conn)
             conn.commit()
             self._seed_super_admin(conn)
         self._reset_pool_after_schema_change()
@@ -263,6 +264,31 @@ class JobStore:
 
     def _migrate_jobs(self, conn: psycopg.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS checkpoint_json JSONB")
+
+    def _migrate_book_pages(self, conn: psycopg.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS book_pages (
+                id TEXT PRIMARY KEY,
+                book_id TEXT NOT NULL,
+                book_resource_id TEXT,
+                job_id TEXT REFERENCES jobs(job_id) ON DELETE SET NULL,
+                pdf_page_number INT NOT NULL,
+                printed_page_number TEXT,
+                document_count INT NOT NULL DEFAULT 0,
+                page_json JSONB,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(book_id, pdf_page_number)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_book_pages_book ON book_pages(book_id, pdf_page_number)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_book_pages_resource ON book_pages(book_resource_id, pdf_page_number)"
+        )
 
     def _migrate_catalog_seo(self, conn: psycopg.Connection) -> None:
         for table in CATALOG_TABLES:
@@ -1355,8 +1381,146 @@ class JobStore:
             ).rowcount
             requeued = conn.execute(
                 """UPDATE jobs SET status='queued', stage='queued', message='Recovered after service restart',
-                   started_at=NULL, updated_at=%s WHERE status='running'""",
+                   started_at=NULL, updated_at=%s
+                   WHERE status='running' AND COALESCE(stage, '') <> 'remote_ingest'""",
                 (now,),
             ).rowcount
             conn.commit()
         return {"requeued": requeued, "paused": paused, "cancelled": 0}
+
+    def register_remote_book(
+        self,
+        *,
+        resource_id: str,
+        subject_id: str | None,
+        original_filename: str,
+        size_bytes: int,
+        sha256: str,
+        metadata: dict[str, Any],
+        created_by: str | None = None,
+    ) -> dict[str, Any]:
+        existing = self.get_book(resource_id)
+        if existing:
+            return existing
+        stored_path = f"remote://local-admin/{resource_id}"
+        return self.create_book(
+            resource_id=resource_id,
+            original_filename=original_filename,
+            stored_path=stored_path,
+            size_bytes=size_bytes,
+            sha256=sha256,
+            metadata=metadata,
+            subject_id=subject_id,
+            created_by=created_by,
+        )
+
+    def upsert_book_page(
+        self,
+        *,
+        page_id: str,
+        book_id: str,
+        book_resource_id: str,
+        job_id: str,
+        pdf_page_number: int,
+        printed_page_number: str | None,
+        document_count: int,
+        page_json: dict[str, Any],
+    ) -> None:
+        now = utcnow()
+        with self.pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO book_pages(
+                    id, book_id, book_resource_id, job_id, pdf_page_number,
+                    printed_page_number, document_count, page_json, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                ON CONFLICT (book_id, pdf_page_number) DO UPDATE SET
+                    book_resource_id=EXCLUDED.book_resource_id,
+                    job_id=EXCLUDED.job_id,
+                    printed_page_number=EXCLUDED.printed_page_number,
+                    document_count=EXCLUDED.document_count,
+                    page_json=EXCLUDED.page_json,
+                    updated_at=EXCLUDED.updated_at
+                """,
+                (
+                    page_id,
+                    book_id,
+                    book_resource_id,
+                    job_id,
+                    pdf_page_number,
+                    printed_page_number,
+                    document_count,
+                    json.dumps(page_json, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+    def list_book_pages(self, book_id: str) -> list[dict[str, Any]]:
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, book_id, book_resource_id, job_id, pdf_page_number,
+                       printed_page_number, document_count, page_json, created_at, updated_at
+                FROM book_pages WHERE book_id=%s ORDER BY pdf_page_number
+                """,
+                (book_id,),
+            ).fetchall()
+        items = []
+        for row in rows or []:
+            item = dict(row)
+            if item.get("page_json") and hasattr(item["page_json"], "copy"):
+                item["page_json"] = dict(item["page_json"])
+            items.append(item)
+        return items
+
+    def create_remote_job_record(
+        self,
+        *,
+        job_id: str,
+        book_resource_id: str,
+        book_id: str | None,
+        output_dir: str,
+        start_page: int,
+        end_page: int | None,
+        extractor_backend: str,
+        metadata_overrides: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = dict(metadata_overrides or {})
+        metadata["extractor_backend"] = extractor_backend
+        metadata["source"] = "local_admin"
+        now = utcnow()
+        with self.pool.connection() as conn:
+            conn.execute(
+                """INSERT INTO jobs(
+                    job_id, book_resource_id, status, progress, stage, message,
+                    start_page, end_page, resume, index_to_opensearch, recreate_index,
+                    metadata_overrides_json, output_dir, book_id, started_at, created_at, updated_at
+                ) VALUES (
+                    %s, %s, 'running', 0, 'remote_ingest', 'Waiting for pages from local admin',
+                    %s, %s, TRUE, TRUE, FALSE, %s::jsonb, %s, %s, %s, %s, %s
+                )""",
+                (
+                    job_id,
+                    book_resource_id,
+                    start_page,
+                    end_page,
+                    json.dumps(metadata, ensure_ascii=False),
+                    output_dir,
+                    book_id,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        self.add_event(
+            job_id,
+            "remote_ingest_started",
+            stage="remote_ingest",
+            progress=0,
+            message="Local admin job registered",
+            payload={"extractor_backend": extractor_backend, "source": "local_admin"},
+        )
+        return self.get_job(job_id)  # type: ignore[return-value]

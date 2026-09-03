@@ -13,12 +13,12 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
-from ..config import settings
-from .auth_utils import ADMIN_ROLES, create_access_token, decode_access_token, verify_password
-from .catalog_seo import CATALOG_ENTITY_TYPES, CatalogDuplicateError, default_hero_file
-from .deps import require_admin, require_admin_sse, require_super_admin
-from .job_store import JobStore
-from .models import (
+from book_ingestor.config import settings
+from book_ingestor.api.auth_utils import ADMIN_ROLES, create_access_token, decode_access_token, verify_password
+from book_ingestor.api.catalog_seo import CATALOG_ENTITY_TYPES, CatalogDuplicateError, default_hero_file
+from pdf_codex_extractor.api.deps import require_admin, require_admin_sse, require_super_admin
+from pdf_codex_extractor.api.job_store import ExtendedJobStore
+from pdf_codex_extractor.api.models import (
     CreateAdminRequest,
     CreateCountryRequest,
     CreateEducationSystemRequest,
@@ -28,10 +28,14 @@ from .models import (
     ExtractionJobRequest,
     LoginRequest,
     QuestionSearchRequest,
+    RemoteSyncRequest,
     SearchRequest,
 )
-from .worker import ExtractionWorkerPool
-from .ingest_routes import router as ingest_router
+from pdf_codex_extractor.api.remote_sync import remote_opensearch_configured, sync_book_documents_from_local
+from pdf_codex_extractor.api.remote_client import RemoteApiError, RemoteIngestClient, remote_api_configured
+from pdf_codex_extractor.api.remote_catalog import remote_catalog_metadata
+from pdf_codex_extractor.api.worker import ExtractionWorkerPool
+from pdf_codex_extractor.config import settings as px_settings
 
 
 DATA_ROOT = Path(settings.api_data_root).resolve()
@@ -44,10 +48,24 @@ HERO_ROOT.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_HERO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".svg"}
 
-store = JobStore(settings.database_url)
+store = ExtendedJobStore(settings.database_url)
 workers = ExtractionWorkerPool(store)
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "paused"}
+
+
+def _bearer_token(request: Request) -> str | None:
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip() or None
+    return None
+
+
+def _remote_client_from_request(request: Request) -> RemoteIngestClient:
+    token = _bearer_token(request)
+    if not token:
+        raise HTTPException(401, "Authentication required for remote operations")
+    return RemoteIngestClient(token)
 
 
 def _catalog_entity_exists(entity_type: str, entity_id: str) -> bool:
@@ -108,6 +126,10 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
         "resume": job["resume"],
         "index_to_opensearch": job["index_to_opensearch"],
         "recreate_index": job["recreate_index"],
+        "extractor_backend": job.get("extractor_backend") or "local",
+        "sync_to_remote": bool(job.get("sync_to_remote")),
+        "remote_sync_status": job.get("remote_sync_status"),
+        "remote_synced_records": job.get("remote_synced_records"),
         "metadata_overrides": job.get("metadata_overrides") or {},
         "book_id": job.get("book_id"),
         "extracted_records": job.get("extracted_records"),
@@ -164,8 +186,8 @@ def _load_json_artifact(job_id: str, filename: str) -> dict[str, Any]:
 
 
 def _search_service():
-    from ..opensearch_index import create_client
-    from ..search import BookSearchService
+    from book_ingestor.opensearch_index import create_client
+    from book_ingestor.search import BookSearchService
 
     return BookSearchService(create_client(), settings.opensearch_index)
 
@@ -179,11 +201,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Universal Textbook Ingestion API",
-    version="4.1.0",
+    title="PDF Codex Extractor API",
+    version="1.0.0",
     description=(
-        "Persistent background extraction API for Arabic, English and mixed-language textbooks "
-        "with PostgreSQL catalog hierarchy and role-based admin authentication."
+        "Local admin API for textbook extraction using local VLM or Codex, "
+        "PostgreSQL job storage, local OpenSearch indexing, and optional remote sync."
     ),
     lifespan=lifespan,
 )
@@ -197,17 +219,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(ingest_router)
-
 
 @app.get("/health")
 def health():
     return {
         "status": "ok",
-        "service": "ai-book-ingestor",
-        "version": "4.1.0",
+        "service": "pdf-codex-extractor",
+        "version": "1.0.0",
         "workers": settings.api_worker_count,
         "opensearch_index": settings.opensearch_index,
+        "remote_api_configured": remote_api_configured(),
+        "remote_api_url": px_settings.remote_api_url or None,
+        "remote_opensearch_configured": remote_opensearch_configured(),
         "database": "postgresql",
     }
 
@@ -216,6 +239,11 @@ def health():
 
 @app.post("/api/v1/auth/login")
 def login(body: LoginRequest):
+    if remote_api_configured():
+        try:
+            return RemoteIngestClient.login(body.email, body.password)
+        except RemoteApiError as exc:
+            raise HTTPException(401, str(exc)) from exc
     user = store.get_user_by_email(body.email)
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(401, "Invalid email or password")
@@ -257,7 +285,12 @@ def create_admin_user(body: CreateAdminRequest, current: Annotated[dict, Depends
 # --- Catalog hierarchy ---
 
 @app.get("/api/v1/catalog/tree")
-def catalog_tree(_: Annotated[dict, Depends(require_admin)]):
+def catalog_tree(request: Request, _: Annotated[dict, Depends(require_admin)]):
+    if remote_api_configured():
+        try:
+            return _remote_client_from_request(request).request_json("GET", "/api/v1/catalog/tree")
+        except RemoteApiError as exc:
+            raise HTTPException(503, str(exc)) from exc
     return {"items": store.get_catalog_tree()}
 
 
@@ -563,12 +596,19 @@ def delete_subject(subject_id: str, _: Annotated[dict, Depends(require_admin)]):
 
 @app.post("/api/v1/books", status_code=201)
 async def upload_book(
+    request: Request,
     user: Annotated[dict, Depends(require_admin)],
     file: UploadFile = File(...),
     subject_id: str = Form(...),
     metadata: str = Form("{}"),
 ):
-    if not store.get_subject(subject_id):
+    if remote_api_configured():
+        if not store.get_subject(subject_id):
+            try:
+                _remote_client_from_request(request).request_json("GET", f"/api/v1/catalog/subjects/{subject_id}")
+            except RemoteApiError as exc:
+                raise HTTPException(404, f"Subject not found on remote catalog: {exc}") from exc
+    elif not store.get_subject(subject_id):
         raise HTTPException(404, "Subject not found in catalog")
     filename = Path(file.filename or "book.pdf").name
     if not filename.casefold().endswith(".pdf"):
@@ -580,7 +620,14 @@ async def upload_book(
     except Exception as exc:
         raise HTTPException(422, f"Invalid metadata JSON: {exc}") from exc
 
-    metadata_obj.update(_catalog_metadata(subject_id))
+    try:
+        metadata_obj.update(
+            _catalog_metadata(subject_id)
+            if not remote_api_configured()
+            else remote_catalog_metadata(_remote_client_from_request(request), subject_id)
+        )
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
     resource_id = uuid.uuid4().hex
     book_dir = BOOKS_ROOT / resource_id
@@ -621,8 +668,22 @@ async def upload_book(
         sha256=h.hexdigest(),
         metadata=metadata_obj,
         subject_id=subject_id,
-        created_by=user["id"],
+        created_by=None if remote_api_configured() else user.get("id"),
     )
+    if remote_api_configured():
+        try:
+            _remote_client_from_request(request).register_book(
+                resource_id=resource_id,
+                subject_id=subject_id,
+                original_filename=filename,
+                size_bytes=total,
+                sha256=h.hexdigest(),
+                metadata=metadata_obj,
+            )
+        except RemoteApiError as exc:
+            store.delete_book(resource_id)
+            shutil.rmtree(book_dir, ignore_errors=True)
+            raise HTTPException(502, f"Failed to register book on remote server: {exc}") from exc
     return _public_book(book)
 
 
@@ -663,7 +724,7 @@ def delete_book(resource_id: str, _: Annotated[dict, Depends(require_admin)]):
     book_ids = [job.get("book_id") for job in jobs if job.get("book_id")]
     if book_ids:
         try:
-            from ..opensearch_index import create_client
+            from book_ingestor.opensearch_index import create_client
 
             create_client().delete_by_query(
                 index=settings.opensearch_index,
@@ -679,6 +740,7 @@ def delete_book(resource_id: str, _: Annotated[dict, Depends(require_admin)]):
 def create_extraction_job(
     resource_id: str,
     request: ExtractionJobRequest,
+    http_request: Request,
     _: Annotated[dict, Depends(require_admin)],
 ):
     book = store.get_book(resource_id)
@@ -687,6 +749,38 @@ def create_extraction_job(
     job_id = uuid.uuid4().hex
     output_dir = JOBS_ROOT / job_id
     output_dir.mkdir(parents=True, exist_ok=False)
+    metadata = dict(request.metadata_overrides or {})
+    metadata["language_hint"] = request.language_hint
+
+    remote_token = _bearer_token(http_request)
+    sync_to_remote = bool(request.sync_to_remote)
+    if sync_to_remote and remote_api_configured():
+        if not remote_token:
+            raise HTTPException(401, "Remote sync requires a valid login token")
+        from book_ingestor.schemas import BookMetadata
+        from pdf_codex_extractor.opensearch_indexer import book_id_for_pdf
+
+        book_metadata = BookMetadata.model_validate(dict(book.get("metadata") or {}))
+        book_metadata_data = book_metadata.model_dump()
+        book_metadata_data.update(metadata)
+        book_metadata = BookMetadata.model_validate(book_metadata_data)
+        book_id = book_id_for_pdf(Path(book["stored_path"]), book_metadata)
+        try:
+            RemoteIngestClient(remote_token).create_job(
+                job_id=job_id,
+                book_resource_id=resource_id,
+                book_id=book_id,
+                start_page=request.start_page,
+                end_page=request.end_page,
+                extractor_backend=request.extractor_backend,
+                metadata=metadata,
+            )
+        except RemoteApiError as exc:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            raise HTTPException(502, f"Failed to create remote ingestion job: {exc}") from exc
+    elif sync_to_remote and not remote_api_configured():
+        raise HTTPException(503, "REMOTE_API_URL is not configured on the local extractor")
+
     job = store.create_job(
         job_id=job_id,
         book_resource_id=resource_id,
@@ -696,7 +790,11 @@ def create_extraction_job(
         resume=request.resume,
         index_to_opensearch=request.index_to_opensearch,
         recreate_index=request.recreate_index,
-        metadata_overrides=request.metadata_overrides,
+        metadata_overrides=metadata,
+        extractor_backend=request.extractor_backend,
+        sync_to_remote=sync_to_remote,
+        remote_job_id=job_id,
+        remote_auth_token=remote_token if sync_to_remote else None,
     )
     return _public_job(job)
 
@@ -783,7 +881,7 @@ def delete_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
         shutil.rmtree(output_dir, ignore_errors=True)
     if doc_ids:
         try:
-            from ..opensearch_index import create_client, delete_documents
+            from book_ingestor.opensearch_index import create_client, delete_documents
 
             delete_documents(create_client(), settings.opensearch_index, doc_ids)
         except Exception:
@@ -889,9 +987,18 @@ def get_artifact(job_id: str, relative_path: str, _: Annotated[dict, Depends(req
 
 
 @app.post("/api/v1/search")
-def search_content(request: SearchRequest, _: Annotated[dict, Depends(require_admin)]):
+def search_content(request: Request, body: SearchRequest, _: Annotated[dict, Depends(require_admin)]):
+    if remote_api_configured():
+        try:
+            return _remote_client_from_request(request).request_json(
+                "POST",
+                "/api/v1/search",
+                json=body.model_dump(mode="json"),
+            )
+        except RemoteApiError as exc:
+            raise HTTPException(503, str(exc)) from exc
     try:
-        filters = dict(request.filters or {})
+        filters = dict(body.filters or {})
         book_key = filters.get("book_id")
         if book_key:
             ids = [str(book_key)]
@@ -900,7 +1007,7 @@ def search_content(request: SearchRequest, _: Annotated[dict, Depends(require_ad
                 if job.get("book_id"):
                     ids.append(str(job["book_id"]))
             filters["book_id"] = list(dict.fromkeys(ids))
-        items = _search_service().search(request.query, filters, size=request.size)
+        items = _search_service().search(body.query, filters, size=body.size)
         return {"items": items}
     except Exception as exc:
         raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
@@ -986,3 +1093,31 @@ def indexed_asset(asset_id: str, _: Annotated[dict, Depends(require_admin)]):
         raise
     except Exception as exc:
         raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
+
+
+@app.post("/api/v1/sync/books/{book_id}")
+def sync_book_to_remote(
+    book_id: str,
+    request: RemoteSyncRequest,
+    _: Annotated[dict, Depends(require_admin)],
+):
+    if not remote_opensearch_configured():
+        raise HTTPException(503, "Remote OpenSearch is not configured")
+    try:
+        synced, errors = sync_book_documents_from_local(book_id, recreate_index=request.recreate_index)
+        return {"book_id": book_id, "synced_records": synced, "errors": len(errors)}
+    except Exception as exc:
+        raise HTTPException(503, f"Remote sync failed: {exc}") from exc
+
+
+@app.get("/api/v1/sync/status")
+def sync_status(_: Annotated[dict, Depends(require_admin)]):
+    from pdf_codex_extractor.config import settings as px_settings
+
+    return {
+        "remote_opensearch_configured": remote_opensearch_configured(),
+        "local_opensearch_url": px_settings.opensearch_url,
+        "remote_opensearch_url": px_settings.remote_opensearch_url or None,
+        "local_index": px_settings.opensearch_index,
+        "remote_index": px_settings.remote_opensearch_index or px_settings.opensearch_index,
+    }

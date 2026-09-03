@@ -1,5 +1,7 @@
 # Universal AI Textbook Ingestor v4 — REST API + Background Jobs — Arabic + English
 
+> **Production server role:** In the Lessons GPT v3 setup, this API runs on the **remote server** — it hosts auth, catalog, PostgreSQL, OpenSearch, and the secure ingest API (`/api/v1/ingest/*`) that receives pages from the local [pdf_codex_extractor](../pdf_codex_extractor) admin. See the [root README](../README.md) for the full architecture.
+
 A production-oriented Python ingestion framework for converting **Arabic, English, or mixed-language textbooks** into structured, page-grounded records for **OpenSearch + Agentic Search**.
 
 It is intentionally **not built around a fixed subject taxonomy**. The same pipeline can process mathematics, physics, chemistry, biology, geography, history, literature, Arabic, English, religious/cultural studies, computer science, art, economics, vocational material, or unfamiliar future textbook formats.

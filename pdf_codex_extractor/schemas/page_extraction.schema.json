@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pdf_page_number",
+    "printed_page_number",
+    "language",
+    "headings",
+    "body_text",
+    "formulas",
+    "tables_markdown",
+    "figures",
+    "notes"
+  ],
+  "properties": {
+    "pdf_page_number": {
+      "type": "integer",
+      "description": "1-based PDF page index"
+    },
+    "printed_page_number": {
+      "type": ["string", "null"],
+      "description": "Printed page label if visible on the page, else null"
+    },
+    "language": {
+      "type": "string",
+      "description": "Primary language on the page, e.g. ar, en, mixed"
+    },
+    "headings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["level", "title"],
+        "properties": {
+          "level": {
+            "type": "string",
+            "enum": ["unit", "chapter", "lesson", "section", "other"]
+          },
+          "title": { "type": "string" }
+        }
+      }
+    },
+    "body_text": {
+      "type": "string",
+      "description": "Full readable page text in logical reading order"
+    },
+    "formulas": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tables_markdown": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "figures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["caption", "description"],
+        "properties": {
+          "caption": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "notes": {
+      "type": "string",
+      "description": "OCR caveats, illegible regions, or extraction warnings"
+    }
+  }
+}

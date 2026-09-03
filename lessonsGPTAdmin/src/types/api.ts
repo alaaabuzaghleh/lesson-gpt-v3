@@ -31,6 +31,9 @@ export interface HealthResponse {
   workers: number
   opensearch_index: string
   database?: string
+  remote_api_configured?: boolean
+  remote_api_url?: string | null
+  remote_opensearch_configured?: boolean
 }
 
 export interface CatalogSeo {
@@ -153,6 +156,10 @@ export interface ExtractionJob {
   index_to_opensearch: boolean
   recreate_index: boolean
   metadata_overrides: Record<string, unknown>
+  extractor_backend?: 'local' | 'codex'
+  sync_to_remote?: boolean
+  remote_sync_status?: string | null
+  remote_synced_records?: number | null
   book_id: string | null
   extracted_records: number | null
   visual_assets: number | null
@@ -199,6 +206,9 @@ export interface ExtractionJobRequest {
   index_to_opensearch?: boolean
   recreate_index?: boolean
   metadata_overrides?: Record<string, unknown>
+  extractor_backend?: 'local' | 'codex'
+  sync_to_remote?: boolean
+  language_hint?: string
 }
 
 export interface SearchRequest {

@@ -26,6 +26,8 @@ export function BookDetailPage() {
   const [startPage, setStartPage] = useState(1)
   const [endPage, setEndPage] = useState('')
   const [indexToOs, setIndexToOs] = useState(true)
+  const [extractorBackend, setExtractorBackend] = useState<'local' | 'codex'>('local')
+  const [syncToRemote, setSyncToRemote] = useState(true)
 
   const load = useCallback(async () => {
     if (!resourceId) return
@@ -59,6 +61,8 @@ export function BookDetailPage() {
         resume: true,
         index_to_opensearch: indexToOs,
         recreate_index: false,
+        extractor_backend: extractorBackend,
+        sync_to_remote: syncToRemote,
       })
       window.location.href = `/jobs/${job.job_id}`
     } catch (e) {
@@ -134,6 +138,20 @@ export function BookDetailPage() {
             <label className="checkbox-row">
               <input type="checkbox" checked={indexToOs} onChange={(e) => setIndexToOs(e.target.checked)} />
               {t.bookDetail.indexOpenSearch}
+            </label>
+            <label className="field-label" htmlFor="extractor-backend">محرك الاستخراج</label>
+            <select
+              id="extractor-backend"
+              className="text-input"
+              value={extractorBackend}
+              onChange={(e) => setExtractorBackend(e.target.value as 'local' | 'codex')}
+            >
+              <option value="local">محلي (Ollama)</option>
+              <option value="codex">Codex (ChatGPT.app)</option>
+            </select>
+            <label className="checkbox-row">
+              <input type="checkbox" checked={syncToRemote} onChange={(e) => setSyncToRemote(e.target.checked)} />
+              نشر كل صفحة على الخادم البعيد (PostgreSQL + OpenSearch) للطلاب
             </label>
             <button className="btn btn-primary" onClick={startExtraction} disabled={starting}>
               {starting ? t.bookDetail.starting : t.bookDetail.startJob}

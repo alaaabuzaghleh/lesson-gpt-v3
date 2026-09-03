@@ -108,6 +108,16 @@ export function DashboardPage() {
             <div><dt>{t.dashboard.workers}</dt><dd>{health.workers}</dd></div>
             <div><dt>{t.dashboard.opensearchIndex}</dt><dd dir="ltr">{health.opensearch_index}</dd></div>
             <div><dt>{t.dashboard.serviceName}</dt><dd dir="ltr">{health.service}</dd></div>
+            {health.remote_api_configured !== undefined && (
+              <div>
+                <dt>الخادم البعيد</dt>
+                <dd dir="ltr">
+                  {health.remote_api_configured
+                    ? (health.remote_api_url ?? 'متصل')
+                    : 'غير مُعد'}
+                </dd>
+              </div>
+            )}
           </dl>
         </section>
       )}
