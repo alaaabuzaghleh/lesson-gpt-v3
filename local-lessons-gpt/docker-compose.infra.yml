@@ -1,9 +1,10 @@
-# For local development, use localLessonsGPT instead:
+# localLessonsGPT — external infrastructure
+# Postgres, OpenSearch, OpenSearch Dashboards, pgAdmin (PostgreSQL admin UI)
 #
-#   cd ../local-lessons-gpt
-#   ./scripts/local up all
-#
-# This file is kept for standalone / production deployment of remoteLessonsGPT only.
+# Start:  ./scripts/local up infra
+# Stop:   ./scripts/local down infra
+
+name: lessons-gpt-infra
 
 services:
   postgres:
@@ -17,6 +18,8 @@ services:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    networks:
+      - lessons-gpt
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d lessons_gpt"]
       interval: 5s
@@ -24,12 +27,12 @@ services:
       retries: 10
 
   opensearch:
-    image: ${OPENSEARCH_IMAGE:-opensearchproject/opensearch:2.17.1}
+    image: opensearchproject/opensearch:2.17.1
     container_name: lessons-gpt-opensearch
     environment:
       discovery.type: single-node
       plugins.security.disabled: "true"
-      OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
     ulimits:
       memlock:
         soft: -1
@@ -38,6 +41,8 @@ services:
       - "9200:9200"
     volumes:
       - opensearch-data:/usr/share/opensearch/data
+    networks:
+      - lessons-gpt
 
   dashboards:
     image: opensearchproject/opensearch-dashboards:2.17.1
@@ -49,6 +54,8 @@ services:
       - "5601:5601"
     depends_on:
       - opensearch
+    networks:
+      - lessons-gpt
 
   pgadmin:
     image: dpage/pgadmin4:8
@@ -64,34 +71,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - lessons-gpt
 
-  remote-api:
-    build: .
-    container_name: lessons-gpt-remote-api
-    environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/lessons_gpt
-      OPENSEARCH_URL: http://opensearch:9200
-      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-school_book_content_v3}
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
-      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-superadmin@lessonsgpt.com}
-      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-SuperAdmin123!}
-      API_HOST: 0.0.0.0
-      API_PORT: 8080
-      API_DATA_ROOT: /app/data
-      API_WORKER_COUNT: ${API_WORKER_COUNT:-2}
-      MINERU_ENABLED: ${MINERU_ENABLED:-false}
-    ports:
-      - "8080:8080"
-    volumes:
-      - remote-api-data:/app/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-      opensearch:
-        condition: service_started
+networks:
+  lessons-gpt:
+    name: lessons-gpt
+    driver: bridge
 
 volumes:
   postgres-data:
   opensearch-data:
   pgadmin-data:
-  remote-api-data:

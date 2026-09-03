@@ -16,14 +16,20 @@ Set `REMOTE_API_URL` in `.env` to your remoteLessonsGPT deployment.
 
 ## Quick start
 
+Start infrastructure and remote API via [localLessonsGPT](../local-lessons-gpt/README.md):
+
+```bash
+cd ../local-lessons-gpt
+./scripts/local up all
+```
+
+Then run the extractor on your host:
+
 ```bash
 cd extractor-lessons-gpt
 python3.13 -m venv .venv && source .venv/bin/activate
 pip install -U pip && pip install -r requirements.txt
-cp .env.example .env
-# Edit .env: REMOTE_API_URL, DATABASE_URL, OPENSEARCH_URL
-
-docker compose up -d postgres opensearch   # or use local-lessons-gpt compose
+cp .env.example .env   # REMOTE_API_URL=http://localhost:8081
 ollama pull qwen2.5vl:7b
 python run_api.py
 ```

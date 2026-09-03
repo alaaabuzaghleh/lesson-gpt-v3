@@ -15,17 +15,20 @@ Universal Arabic/English textbook ingestion framework with REST API, background 
 
 ## Quick start
 
+For **local development**, use [localLessonsGPT](../local-lessons-gpt/README.md):
+
+```bash
+cd ../local-lessons-gpt
+./scripts/local up all
+```
+
+Standalone deploy (all-in-one on this folder):
+
 ```bash
 cd remote-lessons-gpt
 cp .env.example .env
-python3.13 -m venv .venv && source .venv/bin/activate
-pip install -U pip && pip install -r requirements.txt
-
-docker compose up -d postgres opensearch
-python run_api.py
+docker compose up -d
 ```
-
-Default: http://localhost:8080 — use `API_PORT=8081` when extractor also runs on 8080.
 
 ## Secure ingest API (local admin)
 

@@ -1,0 +1,53 @@
+# localLessonsGPT — application services (Docker)
+# remoteLessonsGPT API — requires infra network from docker-compose.infra.yml
+#
+# Start:  ./scripts/local up apps
+# Stop:   ./scripts/local down apps
+
+name: lessons-gpt-apps
+
+services:
+  remote-api:
+    build:
+      context: ../remote-lessons-gpt
+      dockerfile: Dockerfile
+    container_name: lessons-gpt-remote-api
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/lessons_gpt
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-school_book_content_v3}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-long-random-string}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-480}
+      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-superadmin@lessonsgpt.com}
+      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-SuperAdmin123!}
+      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
+      API_HOST: 0.0.0.0
+      API_PORT: 8080
+      API_DATA_ROOT: /app/data
+      API_WORKER_COUNT: ${API_WORKER_COUNT:-2}
+      API_MAX_UPLOAD_MB: ${API_MAX_UPLOAD_MB:-1024}
+      API_CORS_ORIGINS: "*"
+      MINERU_ENABLED: ${MINERU_ENABLED:-false}
+      MINERU_REQUIRED: ${MINERU_REQUIRED:-false}
+      VLM_PAGE_EXTRACTION_ENABLED: ${VLM_PAGE_EXTRACTION_ENABLED:-false}
+    ports:
+      - "${REMOTE_API_HOST_PORT:-8081}:8080"
+    volumes:
+      - remote-api-data:/app/data
+    networks:
+      - lessons-gpt
+    depends_on: []
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+networks:
+  lessons-gpt:
+    external: true
+    name: lessons-gpt
+
+volumes:
+  remote-api-data:

@@ -1,69 +1,101 @@
 # localLessonsGPT
 
-Dev orchestration for the Lessons GPT monorepo: shared Docker infrastructure and start scripts.
+Dev orchestration for the Lessons GPT monorepo. Runs **infrastructure in Docker** and **remoteLessonsGPT in Docker**; runs **extractorLessonsGPT** and **adminLessonsGPT** on your host (Ollama/Codex need local access).
 
-## What this package is
+## Two Docker stacks
 
-**localLessonsGPT** is not an application server. It runs the shared services and documents how to start the three apps together:
+| Stack | File | Services |
+|-------|------|----------|
+| **External (infra)** | `docker-compose.infra.yml` | Postgres, OpenSearch, OpenSearch Dashboards, pgAdmin |
+| **Internal (apps)** | `docker-compose.apps.yml` | remoteLessonsGPT API |
 
-| Product | Folder | Port |
-|---------|--------|------|
-| remoteLessonsGPT | [remote-lessons-gpt](../remote-lessons-gpt) | 8081 |
-| extractorLessonsGPT | [extractor-lessons-gpt](../extractor-lessons-gpt) | 8080 |
-| adminLessonsGPT | [admin-lessons-gpt](../admin-lessons-gpt) | 5173 |
+Both share the Docker network `lessons-gpt`.
 
-## Quick start (5 minutes)
-
-### 1. Infrastructure
+## CLI (from your machine)
 
 ```bash
 cd local-lessons-gpt
-docker compose up -d
+cp .env.example .env          # optional overrides
+chmod +x scripts/local scripts/start-dev.sh
+
+./scripts/local up infra        # Postgres + OpenSearch + Dashboards + pgAdmin
+./scripts/local up apps         # remoteLessonsGPT API (requires infra)
+./scripts/local up all          # infra + apps + host instructions
+./scripts/local status
+./scripts/local down all
+./scripts/local host            # print extractor + admin commands
 ```
 
-Starts Postgres (`5432`) and OpenSearch (`9200`).
-
-### 2. Python environments
+One-liner full Docker bootstrap:
 
 ```bash
-# Remote API
-cd ../remote-lessons-gpt
-cp .env.example .env
-python3.13 -m venv .venv && source .venv/bin/activate
-pip install -U pip && pip install -r requirements.txt
+./scripts/start-dev.sh
+```
 
-# Extractor API
+## URLs after `up all`
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| **remoteLessonsGPT** | http://localhost:8081/docs | API login below |
+| **OpenSearch** | http://localhost:9200 | (no auth, local dev) |
+| **OpenSearch Dashboards** | http://localhost:5601 | |
+| **pgAdmin** (PostgreSQL UI) | http://localhost:5050 | `admin@lessonsgpt.local` / `admin` |
+| **Postgres** (direct) | `localhost:5432` | `postgres` / `postgres`, db `lessons_gpt` |
+
+### pgAdmin — connect to Postgres
+
+1. Open http://localhost:5050
+2. Add server → **Host:** `postgres`, **Port:** `5432`, **Username:** `postgres`, **Password:** `postgres`
+
+## Host apps (not in Docker)
+
+After Docker is up, start extraction and admin on your Mac:
+
+```bash
+./scripts/local host
+```
+
+Or manually:
+
+```bash
+# extractorLessonsGPT (:8080)
 cd ../extractor-lessons-gpt
-cp .env.example .env
-# Set REMOTE_API_URL=http://localhost:8081 in .env
+cp .env.example .env   # REMOTE_API_URL=http://localhost:8081
 python3.13 -m venv .venv && source .venv/bin/activate
-pip install -U pip && pip install -r requirements.txt
+pip install -r requirements.txt
 ollama pull qwen2.5vl:7b
-```
+python run_api.py
 
-### 3. Admin UI
-
-```bash
+# adminLessonsGPT (:5173)
 cd ../admin-lessons-gpt
-npm install
+npm install && npm run dev
 ```
 
-### 4. Start everything
-
-```bash
-./local-lessons-gpt/scripts/start-dev.sh
-```
-
-Then run the three commands it prints (remote → extractor → admin).
-
-### 5. Log in
-
-http://localhost:5173/login — use remote admin credentials (`superadmin@lessonsgpt.com` / `SuperAdmin123!` by default).
-
-## Environment template
-
-See [.env.example](.env.example) for variables shared across packages.
+Login: http://localhost:5173/login — `superadmin@lessonsgpt.com` / `SuperAdmin123!`
 
 ## Architecture
 
-See the [root README](../README.md) for the full system diagram.
+```
+┌─ docker-compose.infra.yml (external) ─────────────────────┐
+│  Postgres :5432  │  OpenSearch :9200  │  Dashboards :5601 │
+│  pgAdmin :5050                                            │
+└───────────────────────────┬───────────────────────────────┘
+                            │ network: lessons-gpt
+┌─ docker-compose.apps.yml (internal) ──────────────────────┐
+│  remoteLessonsGPT API :8081                               │
+└───────────────────────────┬───────────────────────────────┘
+                            │
+┌─ your host ───────────────────────────────────────────────┐
+│  extractorLessonsGPT :8080  │  adminLessonsGPT :5173      │
+└───────────────────────────────────────────────────────────┘
+```
+
+## Package map
+
+| Product | Where it runs | Port |
+|---------|---------------|------|
+| remoteLessonsGPT | Docker (`docker-compose.apps.yml`) | 8081 |
+| extractorLessonsGPT | Host | 8080 |
+| adminLessonsGPT | Host | 5173 |
+
+See the [root README](../README.md) for the full system overview.

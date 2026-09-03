@@ -9,7 +9,7 @@ Textbook ingestion platform for Arabic and mixed-language school books.
 | **remoteLessonsGPT** | [remote-lessons-gpt/](remote-lessons-gpt/) | 8081 | Production API: auth, catalog, ingest, PostgreSQL, OpenSearch |
 | **extractorLessonsGPT** | [extractor-lessons-gpt/](extractor-lessons-gpt/) | 8080 | Local PDF extraction + per-page remote sync |
 | **adminLessonsGPT** | [admin-lessons-gpt/](admin-lessons-gpt/) | 5173 | Arabic RTL admin dashboard |
-| **localLessonsGPT** | [local-lessons-gpt/](local-lessons-gpt/) | — | Dev orchestration (Docker, scripts) |
+| **localLessonsGPT** | [local-lessons-gpt/](local-lessons-gpt/) | — | Dev orchestration (Docker CLI) |
 
 ### Naming convention
 
@@ -17,57 +17,32 @@ Textbook ingestion platform for Arabic and mixed-language school books.
 - **Folders:** kebab-case — `remote-lessons-gpt`
 - **Python packages:** snake_case — `remote_lessons_gpt`
 
-## Architecture
-
-```
-adminLessonsGPT (:5173)
-    → extractorLessonsGPT (:8080)     PDF upload + extraction
-    → remoteLessonsGPT (:8081)        auth, catalog, search, ingest
-
-extractorLessonsGPT
-    → after each page → POST /api/v1/ingest/jobs/{id}/pages
-    → remoteLessonsGPT → PostgreSQL + OpenSearch (student app)
-```
-
-## Quick start
-
-Use **[localLessonsGPT](local-lessons-gpt/README.md)** for the fastest path:
+## Quick start (CLI on your machine)
 
 ```bash
 cd local-lessons-gpt
-docker compose up -d
+cp .env.example .env
+chmod +x scripts/local scripts/start-dev.sh
 ./scripts/start-dev.sh
 ```
 
-Then start remote (8081), extractor (8080), and admin (5173) as printed.
+This starts:
 
-### Prerequisites
+1. **External Docker stack** — Postgres, OpenSearch, Dashboards, pgAdmin
+2. **Internal Docker stack** — remoteLessonsGPT API
+3. Prints commands to start **extractor** and **admin** on your host
 
-- Python 3.11–3.13, Node.js 20+, Docker Desktop
-- Ollama with `qwen2.5vl:7b` (local extraction) or ChatGPT.app Codex
+Then follow the printed host commands, or run:
+
+```bash
+./scripts/local host
+```
 
 ### Default login
 
-Remote admin credentials from `remote-lessons-gpt/.env`:
+http://localhost:5173/login — `superadmin@lessonsgpt.com` / `SuperAdmin123!`
 
-- `superadmin@lessonsgpt.com` / `SuperAdmin123!`
-
-## Typical workflow
-
-1. Log in to adminLessonsGPT with **remote** credentials
-2. Pick a subject from the remote catalog
-3. Upload a PDF (stored locally, registered on remote)
-4. Start extraction with **remote sync** enabled
-5. Each page appears in remote OpenSearch for the AI teacher app
-
-## Package READMEs
-
-- [local-lessons-gpt/README.md](local-lessons-gpt/README.md) — run the full dev stack
-- [remote-lessons-gpt/README.md](remote-lessons-gpt/README.md) — production server + ingest API
-- [extractor-lessons-gpt/README.md](extractor-lessons-gpt/README.md) — local extraction
-- [admin-lessons-gpt/README.md](admin-lessons-gpt/README.md) — admin UI
-
-## Ports
+## Dev URLs
 
 | Service | URL |
 |---------|-----|
@@ -75,15 +50,31 @@ Remote admin credentials from `remote-lessons-gpt/.env`:
 | extractorLessonsGPT | http://localhost:8080/docs |
 | remoteLessonsGPT | http://localhost:8081/docs |
 | OpenSearch | http://localhost:9200 |
+| OpenSearch Dashboards | http://localhost:5601 |
+| pgAdmin (PostgreSQL) | http://localhost:5050 |
 | Postgres | `localhost:5432` / `lessons_gpt` |
+
+## Architecture
+
+```
+adminLessonsGPT (:5173)  ──► extractorLessonsGPT (:8080)  ──► remoteLessonsGPT (:8081)
+                                                                    │
+                                                    Postgres + OpenSearch (Docker)
+```
+
+## Package READMEs
+
+- [local-lessons-gpt/README.md](local-lessons-gpt/README.md) — Docker CLI and full dev stack
+- [remote-lessons-gpt/README.md](remote-lessons-gpt/README.md) — production server + ingest API
+- [extractor-lessons-gpt/README.md](extractor-lessons-gpt/README.md) — local extraction
+- [admin-lessons-gpt/README.md](admin-lessons-gpt/README.md) — admin UI
 
 ## Key environment variables
 
 | Variable | Package | Purpose |
 |----------|---------|---------|
-| `REMOTE_API_URL` | extractor | Points to remoteLessonsGPT |
+| `REMOTE_API_URL` | extractor | `http://localhost:8081` |
 | `DATABASE_URL` | remote, extractor | PostgreSQL |
 | `OPENSEARCH_URL` | remote, extractor | Search cluster |
-| `API_PORT` | remote, extractor | HTTP port (8081 / 8080) |
 
-See each package's `.env.example` for the full list.
+See [local-lessons-gpt/.env.example](local-lessons-gpt/.env.example) for Docker orchestration variables.
