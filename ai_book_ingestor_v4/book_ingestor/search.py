@@ -15,6 +15,15 @@ class BookSearchService:
         for field, value in (filters or {}).items():
             if value is None:
                 continue
+            if field == "book_id":
+                ids = list(value) if isinstance(value, (list, tuple, set)) else [value]
+                clauses.append({
+                    "bool": {
+                        "should": [{"term": {"book_id": item}} for item in ids],
+                        "minimum_should_match": 1,
+                    }
+                })
+                continue
             if isinstance(value, (list, tuple, set)):
                 clauses.append({"terms": {field: list(value)}})
             else:
@@ -23,12 +32,22 @@ class BookSearchService:
 
     def search(self, query: str, filters: dict[str, Any] | None = None, size: int = 15) -> list[dict]:
         nq = normalize_general(query)
+        filter_clauses = self._term_filters(filters)
+        if not (query or "").strip():
+            body = {
+                "size": size,
+                "track_total_hits": True,
+                "query": {"bool": {"filter": filter_clauses}} if filter_clauses else {"match_all": {}},
+                "sort": [{"pdf_page_number": "asc"}, {"sequence": "asc"}],
+            }
+            response = self.client.search(index=self.index_name, body=body)
+            return [{"score": hit.get("_score"), **hit["_source"]} for hit in response["hits"]["hits"]]
         body = {
             "size": size,
             "track_total_hits": True,
             "query": {
                 "bool": {
-                    "filter": self._term_filters(filters),
+                    "filter": filter_clauses,
                     "should": [
                         {
                             "multi_match": {
@@ -44,6 +63,7 @@ class BookSearchService:
                                     "question_reference_text^5", "question_reference_text.ar^5", "question_reference_text.en^5",
                                     "caption^3", "text^2", "text.ar^2", "text.en^2",
                                     "ocr_text^3", "ocr_text.ar^3", "ocr_text.en^3",
+                                    "search_text^2", "search_text.ar^2", "normalized_text^2",
                                 ],
                                 "type": "best_fields",
                                 "operator": "or",
@@ -268,6 +288,69 @@ class BookSearchService:
         }
         r = self.client.search(index=self.index_name, body=body)
         return [hit["_source"] for hit in r["hits"]["hits"]]
+
+    def book_outline(self, book_id: str) -> dict:
+        body = {
+            "size": 0,
+            "query": {"term": {"book_id": book_id}},
+            "aggs": {
+                "chapters": {
+                    "terms": {
+                        "field": "chapter_id",
+                        "size": 200,
+                        "missing": "_uncategorized",
+                        "order": {"first_page": "asc"},
+                    },
+                    "aggs": {
+                        "title": {"terms": {"field": "chapter_title.raw", "size": 1}},
+                        "first_page": {"min": {"field": "pdf_page_number"}},
+                        "last_page": {"max": {"field": "pdf_page_number"}},
+                        "lessons": {
+                            "terms": {
+                                "field": "lesson_id",
+                                "size": 500,
+                                "missing": "_chapter_body",
+                                "order": {"first_page": "asc"},
+                            },
+                            "aggs": {
+                                "title": {"terms": {"field": "lesson_title.raw", "size": 1}},
+                                "first_page": {"min": {"field": "pdf_page_number"}},
+                                "last_page": {"max": {"field": "pdf_page_number"}},
+                                "docs": {"value_count": {"field": "id"}},
+                            },
+                        },
+                    },
+                }
+            },
+        }
+        response = self.client.search(index=self.index_name, body=body)
+        chapters = []
+        for chapter in response.get("aggregations", {}).get("chapters", {}).get("buckets", []):
+            title_buckets = chapter.get("title", {}).get("buckets", [])
+            lessons = []
+            for lesson in chapter.get("lessons", {}).get("buckets", []):
+                lesson_titles = lesson.get("title", {}).get("buckets", [])
+                lessons.append(
+                    {
+                        "id": None if lesson["key"] == "_chapter_body" else lesson["key"],
+                        "type": "lesson",
+                        "title": lesson_titles[0]["key"] if lesson_titles else "محتوى الفصل",
+                        "start_page": lesson.get("first_page", {}).get("value"),
+                        "end_page": lesson.get("last_page", {}).get("value"),
+                        "content_count": int(lesson.get("docs", {}).get("value") or 0),
+                    }
+                )
+            chapters.append(
+                {
+                    "id": None if chapter["key"] == "_uncategorized" else chapter["key"],
+                    "type": "chapter",
+                    "title": title_buckets[0]["key"] if title_buckets else "بدون فصل",
+                    "start_page": chapter.get("first_page", {}).get("value"),
+                    "end_page": chapter.get("last_page", {}).get("value"),
+                    "lessons": lessons,
+                }
+            )
+        return {"book_id": book_id, "chapters": chapters}
 
     def adjacent_blocks(self, book_id: str, pdf_page_number: int, sequence: int, radius: int = 1) -> list[dict]:
         # Fetch nearby pages then order deterministically. This also works across page boundaries.

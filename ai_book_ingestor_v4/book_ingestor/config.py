@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     mineru_text_chars: int = 16000
     ocr_min_chars: int = 20
     ocr_retry_empty: bool = True
-    vlm_page_extraction_enabled: bool = True
+    vlm_page_extraction_enabled: bool = False
 
     api_host: str = "0.0.0.0"
     api_port: int = 8080

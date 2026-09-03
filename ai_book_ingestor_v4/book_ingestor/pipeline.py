@@ -11,7 +11,7 @@ from rich.progress import Progress
 
 from .checkpoint import JobCheckpoint, checkpoint_path
 from .config import settings
-from .hierarchy import HierarchyResolver
+from .hierarchy import HierarchyResolver, build_content_tree, hierarchy_path_from
 from .mineru_parser import (
     MinerUError,
     MinerUPage,
@@ -27,7 +27,7 @@ from .pdf_reader import PDFReader, PageData
 from .prompts import BOOK_METADATA_PROMPT, BOOK_METADATA_SYSTEM, PAGE_SYSTEM, page_prompt
 from .quality import block_quality_score, ocr_completeness, ocr_page_is_sparse, ocr_page_quality_score
 from .question_intelligence import QuestionIntelligenceEngine
-from .schemas import BookMetadata, ContentType, IndexDocument, PageExtraction, QuestionData, VISUAL_TYPES, VisualAnalysis
+from .schemas import BookMetadata, ContentType, HierarchyContext, IndexDocument, PageExtraction, QuestionData, VISUAL_TYPES, VisualAnalysis
 from .visual_analyzer import UniversalVisualAnalyzer
 from .vlm_client import OpenAICompatibleVLM
 
@@ -127,6 +127,8 @@ class BookIngestionPipeline:
             ),
             [page.as_data_url()],
         )
+        if isinstance(raw, dict):
+            raw["pdf_page_number"] = page.pdf_page_number
         (self.raw_dir / f"page_{page.pdf_page_number:04d}.json").write_text(
             json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -417,16 +419,7 @@ class BookIngestionPipeline:
         if cancel_check and cancel_check():
             raise JobCancelled("Extraction job was stopped")
         page_data = self.reader.render_page(page_ex.pdf_page_number)
-        hierarchy_path = [
-            x
-            for x in [
-                hierarchy.unit_title,
-                hierarchy.chapter_title,
-                hierarchy.lesson_title,
-                hierarchy.section_title,
-            ]
-            if x
-        ]
+        hierarchy_path = hierarchy_path_from(hierarchy)
 
         for block in page_ex.blocks:
             if cancel_check and cancel_check():
@@ -516,6 +509,9 @@ class BookIngestionPipeline:
                     chapter_title=hierarchy.chapter_title,
                     lesson_title=hierarchy.lesson_title,
                     section_title=hierarchy.section_title,
+                    unit_id=getattr(hierarchy, "unit_id", None),
+                    chapter_id=getattr(hierarchy, "chapter_id", None),
+                    lesson_id=getattr(hierarchy, "lesson_id", None),
                     hierarchy_path=hierarchy_path,
                     sequence=block.sequence,
                     content_type=ctype,
@@ -570,25 +566,43 @@ class BookIngestionPipeline:
     def _is_ocr_document(doc: IndexDocument) -> bool:
         return doc.content_type == ContentType.OCR_PAGE.value or doc.subtype == "ocr_block"
 
+    @staticmethod
+    def _hierarchy_fields(ctx: HierarchyContext) -> dict[str, Any]:
+        return {
+            "unit_title": ctx.unit_title,
+            "chapter_title": ctx.chapter_title,
+            "lesson_title": ctx.lesson_title,
+            "section_title": ctx.section_title,
+            "unit_id": ctx.unit_id,
+            "chapter_id": ctx.chapter_id,
+            "lesson_id": ctx.lesson_id,
+            "hierarchy_path": hierarchy_path_from(ctx),
+        }
+
     def _build_ocr_documents(
         self,
         metadata: BookMetadata,
         book_id: str,
         page_no: int,
+        hierarchy: HierarchyContext | None = None,
     ) -> list[IndexDocument]:
         mineru_page = self.reader.mineru.page(page_no) if self.reader.mineru is not None else None
         page_data = self.reader.render_page(page_no)
         if mineru_page is None:
             mineru_page = MinerUPage(pdf_page_number=page_no)
 
-        ocr_text = mineru_page.text or page_data.text_layer
-        indexable_blocks = sum(1 for block in mineru_page.blocks if mineru_block_is_indexable(block))
-        ocr_source = "mineru" if self.reader.mineru is not None and self.reader.mineru.page(page_no) else "pdf"
+        ocr_text = page_data.text_layer or mineru_page.text or ""
+        indexable_blocks = [block for block in mineru_page.blocks if mineru_block_is_indexable(block)]
+        ocr_source = page_data.text_source or (
+            "mineru" if self.reader.mineru is not None and self.reader.mineru.page(page_no) else "pdf"
+        )
         language = metadata.language
         notes = ["mineru_ocr"] if ocr_source == "mineru" else ["pdf_text_layer"]
-        if ocr_page_is_sparse(ocr_text, indexable_blocks, settings.ocr_min_chars):
+        if ocr_page_is_sparse(ocr_text, len(indexable_blocks), settings.ocr_min_chars):
             notes.append("empty_page" if not (ocr_text or "").strip() else "sparse_ocr")
-        quality = ocr_page_quality_score(ocr_text, indexable_blocks, ocr_source, settings.ocr_min_chars)
+        quality = ocr_page_quality_score(ocr_text, len(indexable_blocks), ocr_source, settings.ocr_min_chars)
+        ctx = hierarchy or HierarchyContext()
+        path = hierarchy_path_from(ctx)
         docs: list[IndexDocument] = []
         page_id = stable_block_id(book_id, page_no, 0, ocr_text or f"ocr-page-{page_no}", ContentType.OCR_PAGE.value)
         docs.append(
@@ -605,13 +619,14 @@ class BookIngestionPipeline:
                 academic_year=metadata.academic_year,
                 language=language,
                 pdf_page_number=page_no,
+                **self._hierarchy_fields(ctx),
                 sequence=0,
                 content_type=ContentType.OCR_PAGE.value,
                 subtype="ocr_page",
                 title=f"OCR page {page_no}",
                 text=ocr_text,
                 normalized_text=normalize_general(ocr_text),
-                search_text=build_search_text(metadata.title, metadata.subject, metadata.grade, ocr_text),
+                search_text=build_search_text(metadata.title, metadata.subject, metadata.grade, path, ocr_text),
                 ocr_text=ocr_text,
                 ocr_source=ocr_source,
                 text_source=page_data.text_source,
@@ -623,14 +638,14 @@ class BookIngestionPipeline:
             )
         )
         seq = 0
-        for block in mineru_page.blocks:
-            if not mineru_block_is_indexable(block):
-                continue
+        for block in indexable_blocks:
             seq += 1
             text = (block.text or "").strip()
+            if not text:
+                continue
             ctype = mineru_content_type(block)
             caption = str(block.extra.get("caption") or "") or None
-            search_text = build_search_text(metadata.title, metadata.subject, metadata.grade, ctype, text, caption)
+            search_text = build_search_text(metadata.title, metadata.subject, metadata.grade, path, ctype, text, caption)
             docs.append(
                 IndexDocument(
                     id=stable_block_id(book_id, page_no, seq, f"ocr|{text}", ctype),
@@ -645,6 +660,7 @@ class BookIngestionPipeline:
                     academic_year=metadata.academic_year,
                     language=language,
                     pdf_page_number=page_no,
+                    **self._hierarchy_fields(ctx),
                     sequence=seq,
                     content_type=ctype,
                     subtype="ocr_block",
@@ -685,6 +701,7 @@ class BookIngestionPipeline:
         check_cancel,
         checkpoint: JobCheckpoint,
         force: bool = False,
+        progress_value: float = 6.0,
     ) -> None:
         if not settings.mineru_enabled:
             return
@@ -698,7 +715,7 @@ class BookIngestionPipeline:
         check_cancel()
         emit(
                 "mineru_parse",
-                5.15,
+                progress_value,
                 f"Parsing page {page_no} with MinerU",
                 current_page=page_no,
         )
@@ -710,14 +727,14 @@ class BookIngestionPipeline:
                 end_page=page_no,
                 language=language,
                 resume=resume,
-                progress=lambda message: emit("mineru_parse", 5.15, message, current_page=page_no),
+                progress=lambda message: emit("mineru_parse", progress_value, message, current_page=page_no),
                 artifact_dir=mineru_page_artifact_dir(self.output_dir, page_no),
             )
         except MinerUError as exc:
             if settings.mineru_required:
                 raise
             console.print(f"[yellow]MinerU unavailable on page {page_no} ({exc}); using PDF text layer[/yellow]")
-            emit("mineru_parse", 5.15, f"MinerU unavailable on page {page_no}; using PDF text", current_page=page_no)
+            emit("mineru_parse", progress_value, f"MinerU unavailable on page {page_no}; using PDF text", current_page=page_no)
             return
         self.reader.attach_mineru(document)
         checkpoint.mark_mineru(page_no)
@@ -740,6 +757,7 @@ class BookIngestionPipeline:
         page_docs_callback: PageDocsCallback | None,
         checkpoint: JobCheckpoint,
         language: str | None,
+        ocr_end_progress: float = 40.0,
     ) -> list[IndexDocument]:
         indexed: list[IndexDocument] = []
         requested = max(1, end_page - start_page + 1)
@@ -749,17 +767,27 @@ class BookIngestionPipeline:
             for page_no in cached.pages:
                 checkpoint.mark_mineru(page_no)
             persist("mineru_parse")
-            emit("mineru_parse", 5.1, f"Loaded {len(cached.pages)} cached MinerU pages")
+            emit("mineru_parse", 6.0, f"Loaded {len(cached.pages)} cached MinerU pages")
 
+        resolver = HierarchyResolver(book_id=book_id)
+        ocr_span = max(1.0, float(ocr_end_progress) - 6.0)
         for ordinal, page_no in enumerate(range(start_page, end_page + 1), start=1):
             check_cancel()
+            ocr_progress = 6.0 + (ocr_span * ordinal / requested)
             existing = [d for d in docs_by_page.get(page_no, []) if self._is_ocr_document(d)]
             already_ocr = resume and page_no in checkpoint.ocr_pages and bool(existing)
             if already_ocr:
                 indexed.extend(existing)
+                for doc in existing:
+                    resolver.fill_missing(
+                        unit=doc.unit_title,
+                        chapter=doc.chapter_title,
+                        lesson=doc.lesson_title,
+                        section=doc.section_title,
+                    )
                 emit(
                     "ocr_index",
-                    5.0 + (3.0 * ordinal / requested),
+                    ocr_progress,
                     f"Resumed OCR page {page_no} of {end_page}",
                     current_page=page_no,
                     total_pages=requested,
@@ -774,6 +802,7 @@ class BookIngestionPipeline:
                 persist=persist,
                 check_cancel=check_cancel,
                 checkpoint=checkpoint,
+                progress_value=ocr_progress,
             )
             if settings.ocr_retry_empty and settings.mineru_enabled and self._page_has_sparse_ocr(page_no):
                 self._ensure_mineru_page(
@@ -785,9 +814,18 @@ class BookIngestionPipeline:
                     check_cancel=check_cancel,
                     checkpoint=checkpoint,
                     force=True,
+                    progress_value=ocr_progress,
                 )
 
-            page_docs = existing or self._build_ocr_documents(metadata, book_id, page_no)
+            mineru_page = self.reader.mineru.page(page_no) if self.reader.mineru is not None else None
+            page_data = self.reader.render_page(page_no)
+            if mineru_page is not None:
+                for block in mineru_page.blocks:
+                    resolver.apply_ocr_text(block.text, content_type=mineru_content_type(block), title=block.text[:120])
+            resolver.apply_ocr_text(page_data.text_layer)
+            page_docs = existing or self._build_ocr_documents(
+                metadata, book_id, page_no, hierarchy=resolver.current
+            )
             new_docs = [d for d in page_docs if d.id not in existing_ids]
             if new_docs:
                 self._append_jsonl(jsonl_path, new_docs)
@@ -823,7 +861,7 @@ class BookIngestionPipeline:
             indexed.extend(page_docs)
             emit(
                 "ocr_index",
-                5.0 + (3.0 * ordinal / requested),
+                ocr_progress,
                 f"Indexed page {page_no} of {end_page} into OpenSearch",
                 current_page=page_no,
                 total_pages=requested,
@@ -992,12 +1030,14 @@ class BookIngestionPipeline:
         (self.output_dir / "quality_report.json").write_text(
             json.dumps(quality_report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        outline = build_content_tree(book_id, docs)
         structure = {
             "book_id": book_id,
             "units": sorted({d.unit_title for d in docs if d.unit_title}),
-            "chapters": sorted({d.chapter_title for d in docs if d.chapter_title}),
-            "lessons": sorted({d.lesson_title for d in docs if d.lesson_title}),
+            "chapter_titles": sorted({d.chapter_title for d in docs if d.chapter_title}),
+            "lesson_titles": sorted({d.lesson_title for d in docs if d.lesson_title}),
             "sections": sorted({d.section_title for d in docs if d.section_title}),
+            "tree": outline["chapters"],
             "hierarchy_events": [
                 {
                     "pdf_page_number": p.pdf_page_number,
@@ -1021,6 +1061,9 @@ class BookIngestionPipeline:
         (self.output_dir / "structure.json").write_text(
             json.dumps(structure, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        (self.output_dir / "outline.json").write_text(
+            json.dumps(outline, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         manifest = {
             "schema_version": 3,
             "book_id": book_id,
@@ -1037,6 +1080,7 @@ class BookIngestionPipeline:
             "documents_jsonl": str(jsonl_path),
             "quality_report": str(self.output_dir / "quality_report.json"),
             "structure": str(self.output_dir / "structure.json"),
+            "outline": str(self.output_dir / "outline.json"),
             "checkpoint": str(checkpoint_path(self.output_dir)),
         }
         (self.output_dir / "manifest.json").write_text(
@@ -1142,7 +1186,8 @@ class BookIngestionPipeline:
                 detected = BookMetadata(title=self.pdf_path.stem, confidence=0.2)
 
         metadata = merge_metadata(detected, overrides)
-        book_id = checkpoint.book_id or stable_book_id(self.pdf_path, metadata)
+        resource_id = str(overrides.get("book_resource_id") or "").strip()
+        book_id = resource_id or checkpoint.book_id or stable_book_id(self.pdf_path, metadata)
         checkpoint.book_id = book_id
         checkpoint.metadata = metadata.model_dump()
         meta_path.write_text(metadata.model_dump_json(indent=2), encoding="utf-8")
@@ -1182,12 +1227,13 @@ class BookIngestionPipeline:
             page_docs_callback=page_docs_callback,
             checkpoint=checkpoint,
             language=str(overrides.get("language") or metadata.language or "") or None,
+            ocr_end_progress=88.0 if skip_vlm else 40.0,
         )
         persist("ocr_index")
-        emit("ocr_index", 8.0, f"Stored {len(ocr_docs)} OCR records", total_pages=requested_pages)
+        emit("ocr_index", 88.0 if skip_vlm else 40.0, f"Stored {len(ocr_docs)} OCR records", total_pages=requested_pages)
         check_cancel()
 
-        resolver = HierarchyResolver()
+        resolver = HierarchyResolver(book_id=book_id)
         extractions_by_page: dict[int, PageExtraction] = {}
         all_docs: list[IndexDocument] = list(ocr_docs)
         if skip_vlm:
@@ -1222,7 +1268,7 @@ class BookIngestionPipeline:
         for ordinal, page_no in enumerate(range(start_page, end_page + 1), start=1):
             check_cancel()
             checkpoint.current_page = page_no
-            progress = 5.0 + (85.0 * ordinal / requested_pages)
+            progress = 40.0 + (50.0 * ordinal / requested_pages)
             page_ex = extractions_by_page.get(page_no)
             already_extracted = page_ex is not None or page_no in checkpoint.extracted_pages
             already_in_jsonl = page_no in vlm_jsonl_pages

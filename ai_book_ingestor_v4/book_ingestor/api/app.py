@@ -888,7 +888,16 @@ def get_artifact(job_id: str, relative_path: str, _: Annotated[dict, Depends(req
 @app.post("/api/v1/search")
 def search_content(request: SearchRequest, _: Annotated[dict, Depends(require_admin)]):
     try:
-        items = _search_service().search(request.query, request.filters, size=request.size)
+        filters = dict(request.filters or {})
+        book_key = filters.get("book_id")
+        if book_key:
+            ids = [str(book_key)]
+            jobs = store.list_jobs(book_resource_id=str(book_key), limit=50)
+            for job in jobs:
+                if job.get("book_id"):
+                    ids.append(str(job["book_id"]))
+            filters["book_id"] = list(dict.fromkeys(ids))
+        items = _search_service().search(request.query, filters, size=request.size)
         return {"items": items}
     except Exception as exc:
         raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
@@ -898,6 +907,24 @@ def search_content(request: SearchRequest, _: Annotated[dict, Depends(require_ad
 def indexed_page(book_id: str, page: str, _: Annotated[dict, Depends(require_admin)]):
     try:
         return {"items": _search_service().exact_page(book_id, page)}
+    except Exception as exc:
+        raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
+
+
+@app.get("/api/v1/indexed-books/{book_id}/outline")
+def indexed_book_outline(book_id: str, _: Annotated[dict, Depends(require_admin)]):
+    try:
+        ids = [book_id]
+        jobs = store.list_jobs(book_resource_id=book_id, limit=50)
+        for job in jobs:
+            if job.get("book_id"):
+                ids.append(str(job["book_id"]))
+        for candidate in dict.fromkeys(ids):
+            outline = _search_service().book_outline(str(candidate))
+            if outline.get("chapters"):
+                outline["book_id"] = book_id
+                return outline
+        return {"book_id": book_id, "chapters": []}
     except Exception as exc:
         raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
 

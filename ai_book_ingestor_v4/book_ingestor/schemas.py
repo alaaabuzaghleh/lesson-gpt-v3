@@ -483,6 +483,9 @@ class HierarchyContext(BaseModel):
     chapter_title: Optional[str] = None
     lesson_title: Optional[str] = None
     section_title: Optional[str] = None
+    unit_id: Optional[str] = None
+    chapter_id: Optional[str] = None
+    lesson_id: Optional[str] = None
 
 
 class IndexDocument(BaseModel):
@@ -506,6 +509,9 @@ class IndexDocument(BaseModel):
     chapter_title: Optional[str] = None
     lesson_title: Optional[str] = None
     section_title: Optional[str] = None
+    unit_id: Optional[str] = None
+    chapter_id: Optional[str] = None
+    lesson_id: Optional[str] = None
     hierarchy_path: list[str] = Field(default_factory=list)
 
     sequence: int

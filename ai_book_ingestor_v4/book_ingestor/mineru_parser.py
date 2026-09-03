@@ -13,7 +13,6 @@ import httpx
 from rich.console import Console
 
 from .config import settings
-from .normalizer import looks_like_visual_arabic, restore_arabic_logical_order
 
 console = Console()
 
@@ -189,21 +188,8 @@ def _block_text_from_content_list(item: dict[str, Any]) -> tuple[str, dict[str, 
     return str(item.get("text") or _join_captions(item.get("content")) or "").strip(), extra
 
 
-def _fix_mineru_arabic(pages: dict[int, MinerUPage]) -> dict[int, MinerUPage]:
-    """Restore logical Arabic when MinerU/PaddleOCR stored visual LTR glyphs."""
-    for page in pages.values():
-        blob = "\n".join(
-            part
-            for block in page.blocks
-            for part in (block.text, *(value for value in block.extra.values() if isinstance(value, str)))
-            if part
-        )
-        force = looks_like_visual_arabic(blob)
-        for block in page.blocks:
-            block.text = restore_arabic_logical_order(block.text, force=force)
-            for key, value in list(block.extra.items()):
-                if isinstance(value, str) and value:
-                    block.extra[key] = restore_arabic_logical_order(value, force=force)
+def _keep_mineru_pages(pages: dict[int, MinerUPage]) -> dict[int, MinerUPage]:
+    """Pass MinerU blocks through unchanged so we can judge default OCR quality."""
     return pages
 
 
@@ -224,7 +210,7 @@ def parse_content_list(items: list[Any], *, page_offset: int = 0) -> dict[int, M
         )
         page = pages.setdefault(pdf_page, MinerUPage(pdf_page_number=pdf_page))
         page.blocks.append(block)
-    return _fix_mineru_arabic(pages)
+    return _keep_mineru_pages(pages)
 
 
 def _content_v2_text(item: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
@@ -281,7 +267,7 @@ def parse_content_list_v2(pages_data: list[Any], *, page_offset: int = 0) -> dic
                     extra=extra,
                 )
             )
-    return _fix_mineru_arabic(pages)
+    return _keep_mineru_pages(pages)
 
 
 def parse_middle_json(data: dict[str, Any], *, page_offset: int = 0) -> dict[int, MinerUPage]:
@@ -313,7 +299,7 @@ def parse_middle_json(data: dict[str, Any], *, page_offset: int = 0) -> dict[int
                     page_idx=page_idx,
                 )
             )
-    return _fix_mineru_arabic(pages)
+    return _keep_mineru_pages(pages)
 
 
 def format_mineru_page_text(blocks: Iterable[MinerUBlock]) -> str:

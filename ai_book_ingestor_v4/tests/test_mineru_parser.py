@@ -33,7 +33,7 @@ def test_mineru_ocr_language_maps_arabic_and_english():
     assert mineru_ocr_language(None) == "arabic"
 
 
-def test_parse_content_list_restores_reversed_arabic():
+def test_parse_content_list_keeps_mineru_arabic_as_is():
     pages = parse_content_list(
         [
             {
@@ -49,9 +49,8 @@ def test_parse_content_list_restores_reversed_arabic():
             },
         ]
     )
-    assert "وزارة التعليم" in pages[1].text
-    assert "نظام المسارات" in pages[1].text
-    assert "ميلعتلا" not in pages[1].text
+    assert "ميلعتلا ةرازو" in pages[1].text
+    assert "تاراسملا ماظن" in pages[1].text
 
 
 def test_parse_content_list_applies_page_offset_and_formats_tables():

@@ -94,7 +94,7 @@ class ExtractionJobRequest(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    query: str = Field(min_length=1)
+    query: str = ""
     filters: dict[str, Any] = Field(default_factory=dict)
     size: int = Field(default=15, ge=1, le=100)
 

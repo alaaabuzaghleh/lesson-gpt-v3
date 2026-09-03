@@ -61,6 +61,7 @@ class ExtractionWorkerPool:
             pipeline = BookIngestionPipeline(book["stored_path"], job["output_dir"])
             base_meta = dict(book.get("metadata") or {})
             base_meta.update(job.get("metadata_overrides") or {})
+            base_meta["book_resource_id"] = job["book_resource_id"]
             if book.get("subject_id"):
                 path = self.store.get_subject_path(book["subject_id"])
                 if path:
@@ -88,6 +89,9 @@ class ExtractionWorkerPool:
             os_client = None
             indexed_records = int(checkpoint.indexed_records or 0)
             os_error_count = 0
+            last_event_progress = -1.0
+            last_event_page = None
+            last_event_stage = None
             should_index = bool(job["index_to_opensearch"])
             if should_index:
                 from ..opensearch_index import bulk_index, create_client, ensure_index
@@ -97,14 +101,27 @@ class ExtractionWorkerPool:
                 ensure_index(os_client, settings.opensearch_index, recreate=recreate)
 
             def progress(event: dict[str, Any]) -> None:
+                nonlocal last_event_progress, last_event_page, last_event_stage
+                value = float(event.get("progress") or 0)
+                page = event.get("current_page")
+                stage = str(event.get("stage") or "running")
+                notable = (
+                    int(value) != int(last_event_progress)
+                    or page != last_event_page
+                    or stage != last_event_stage
+                )
                 self.store.update_progress(
                     job_id,
-                    progress=float(event.get("progress") or 0),
-                    stage=str(event.get("stage") or "running"),
+                    progress=value,
+                    stage=stage,
                     message=str(event.get("message") or "Processing"),
-                    current_page=event.get("current_page"),
+                    current_page=page,
                     total_pages=event.get("total_pages"),
+                    add_event=notable,
                 )
+                last_event_progress = value
+                last_event_page = page
+                last_event_stage = stage
                 if event.get("checkpoint"):
                     self.store.save_checkpoint(job_id, event["checkpoint"])
 
@@ -131,7 +148,6 @@ class ExtractionWorkerPool:
                         message=f"OpenSearch reported {len(errors)} bulk errors on page {page_no}",
                         payload={"page": page_no, "error_count": len(errors)},
                     )
-                    raise RuntimeError(f"OpenSearch reported {len(errors)} bulk errors on page {page_no}")
 
             metadata, book_id, docs = pipeline.run(
                 base_meta,

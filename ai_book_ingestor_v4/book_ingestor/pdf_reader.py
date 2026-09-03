@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Iterator
 import fitz  # PyMuPDF
 from PIL import Image
 
-from .normalizer import restore_arabic_logical_order
+from .ocr_cleanup import choose_page_text
 
 if TYPE_CHECKING:
     from .mineru_parser import MinerUDocument
@@ -57,15 +57,10 @@ class PDFReader:
 
     def render_page(self, page_number: int) -> PageData:
         page = self.doc[page_number - 1]
-        pdf_text = restore_arabic_logical_order(page.get_text("text", sort=True) or "")
+        pdf_text = page.get_text("text", sort=True) or ""
         mineru_page = self.mineru.page(page_number) if self.mineru is not None else None
         mineru_text = mineru_page.text if mineru_page is not None else ""
-        if mineru_text.strip():
-            text = mineru_text
-            text_source = "mineru"
-        else:
-            text = pdf_text
-            text_source = "pdf"
+        text, text_source = choose_page_text(mineru_text, pdf_text)
         mineru_blocks = [block.as_prompt_dict() for block in mineru_page.blocks] if mineru_page else []
         image_path = self.pages_dir / f"page_{page_number:04d}.png"
         if not image_path.exists():

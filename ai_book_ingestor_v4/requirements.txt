@@ -20,4 +20,5 @@ psycopg[binary]>=3.2.0
 psycopg-pool>=3.2.0
 passlib[bcrypt]>=1.7.4
 python-jose[cryptography]>=3.3.0
-bcrypt<5.0.0
+# passlib 1.7 still reads bcrypt.__about__; 4.1+ removed it
+bcrypt>=4.0.1,<4.1.0
