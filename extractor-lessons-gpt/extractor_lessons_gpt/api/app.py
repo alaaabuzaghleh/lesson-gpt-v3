@@ -13,42 +13,22 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
-from remote_lessons_gpt.config import settings
-from remote_lessons_gpt.api.auth_utils import ADMIN_ROLES, create_access_token, decode_access_token, verify_password
-from remote_lessons_gpt.api.catalog_seo import CATALOG_ENTITY_TYPES, CatalogDuplicateError, default_hero_file
-from extractor_lessons_gpt.api.deps import require_admin, require_admin_sse, require_super_admin
-from extractor_lessons_gpt.api.job_store import ExtendedJobStore
-from extractor_lessons_gpt.api.models import (
-    CreateAdminRequest,
-    CreateCountryRequest,
-    CreateEducationSystemRequest,
-    CreateGradeRequest,
-    CreateSubjectRequest,
-    UpdateCatalogItemRequest,
-    ExtractionJobRequest,
-    LoginRequest,
-    QuestionSearchRequest,
-    RemoteSyncRequest,
-    SearchRequest,
-)
-from extractor_lessons_gpt.api.remote_sync import remote_opensearch_configured, sync_book_documents_from_local
-from extractor_lessons_gpt.api.remote_client import RemoteApiError, RemoteIngestClient, remote_api_configured
+from extractor_lessons_gpt.api.deps import require_admin, require_admin_sse
+from extractor_lessons_gpt.api.local_job_store import LocalFileJobStore
+from extractor_lessons_gpt.api.models import ExtractionJobRequest
 from extractor_lessons_gpt.api.remote_catalog import remote_catalog_metadata
+from extractor_lessons_gpt.api.remote_client import RemoteApiError, RemoteIngestClient, remote_api_configured
 from extractor_lessons_gpt.api.worker import ExtractionWorkerPool
-from extractor_lessons_gpt.config import settings as px_settings
+from extractor_lessons_gpt.config import settings
 
 
 DATA_ROOT = Path(settings.api_data_root).resolve()
 BOOKS_ROOT = DATA_ROOT / "books"
 JOBS_ROOT = DATA_ROOT / "jobs"
-HERO_ROOT = DATA_ROOT / "catalog" / "heroes"
 BOOKS_ROOT.mkdir(parents=True, exist_ok=True)
 JOBS_ROOT.mkdir(parents=True, exist_ok=True)
-HERO_ROOT.mkdir(parents=True, exist_ok=True)
 
-ALLOWED_HERO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".svg"}
-
-store = ExtendedJobStore(settings.database_url)
+store = LocalFileJobStore(DATA_ROOT)
 workers = ExtractionWorkerPool(store)
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "paused"}
@@ -66,35 +46,6 @@ def _remote_client_from_request(request: Request) -> RemoteIngestClient:
     if not token:
         raise HTTPException(401, "Authentication required for remote operations")
     return RemoteIngestClient(token)
-
-
-def _catalog_entity_exists(entity_type: str, entity_id: str) -> bool:
-    getters = {
-        "country": store.get_country,
-        "system": store.get_education_system,
-        "grade": store.get_grade,
-        "subject": store.get_subject,
-    }
-    getter = getters.get(entity_type)
-    return bool(getter and getter(entity_id))
-
-
-def _hero_media_type(path: Path) -> str:
-    ext = path.suffix.lower()
-    return {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".webp": "image/webp",
-        ".svg": "image/svg+xml",
-    }.get(ext, "application/octet-stream")
-
-
-def _catalog_write(action):
-    try:
-        return action()
-    except CatalogDuplicateError as exc:
-        raise HTTPException(409, str(exc)) from exc
 
 
 def _public_book(book: dict[str, Any]) -> dict[str, Any]:
@@ -155,23 +106,6 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _catalog_metadata(subject_id: str) -> dict[str, Any]:
-    path = store.get_subject_path(subject_id)
-    if not path:
-        return {}
-    return {
-        "country": path.get("country_name"),
-        "country_id": path.get("country_id"),
-        "country_code": path.get("country_code"),
-        "education_system": path.get("education_system_name"),
-        "education_system_id": path.get("education_system_id"),
-        "grade": path.get("grade_name"),
-        "grade_id": path.get("grade_id"),
-        "subject": path.get("subject_name"),
-        "subject_id": path.get("subject_id"),
-    }
-
-
 def _load_json_artifact(job_id: str, filename: str) -> dict[str, Any]:
     job = store.get_job(job_id)
     if not job:
@@ -185,15 +119,14 @@ def _load_json_artifact(job_id: str, filename: str) -> dict[str, Any]:
         raise HTTPException(500, f"Unable to read artifact: {exc}") from exc
 
 
-def _search_service():
-    from remote_lessons_gpt.opensearch_index import create_client
-    from remote_lessons_gpt.search import BookSearchService
-
-    return BookSearchService(create_client(), settings.opensearch_index)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not remote_api_configured():
+        raise RuntimeError(
+            "REMOTE_API_URL is required. The local extractor publishes pages through "
+            "remote-lessons-gpt secure APIs only (no direct PostgreSQL or OpenSearch access)."
+        )
+    store.initialize()
     workers.start()
     yield
     workers.stop()
@@ -202,10 +135,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="extractorLessonsGPT API",
-    version="1.0.0",
+    version="2.0.0",
     description=(
-        "Local admin API for PDF extraction using Ollama or Codex, "
-        "with per-page publishing to remoteLessonsGPT."
+        "Local PDF extraction API (Ollama/Codex). Persists books and jobs on disk; "
+        "publishes extracted pages to remoteLessonsGPT via secure HTTP ingest only."
     ),
     lifespan=lifespan,
 )
@@ -225,391 +158,27 @@ def health():
     return {
         "status": "ok",
         "service": "extractor-lessons-gpt",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "workers": settings.api_worker_count,
-        "opensearch_index": settings.opensearch_index,
+        "storage": "local-files",
         "remote_api_configured": remote_api_configured(),
-        "remote_api_url": px_settings.remote_api_url or None,
-        "remote_opensearch_configured": remote_opensearch_configured(),
-        "database": "postgresql",
+        "remote_api_url": settings.remote_api_url or None,
     }
 
-
-# --- Auth ---
-
-@app.post("/api/v1/auth/login")
-def login(body: LoginRequest):
-    if remote_api_configured():
-        try:
-            return RemoteIngestClient.login(body.email, body.password)
-        except RemoteApiError as exc:
-            raise HTTPException(401, str(exc)) from exc
-    user = store.get_user_by_email(body.email)
-    if not user or not verify_password(body.password, user["password_hash"]):
-        raise HTTPException(401, "Invalid email or password")
-    if user.get("role") not in ADMIN_ROLES:
-        raise HTTPException(403, "Only admin users can access the admin panel")
-    if not user.get("is_active", True):
-        raise HTTPException(403, "Account is disabled")
-    token = create_access_token({"sub": user["id"], "role": user["role"], "email": user["email"]})
-    public_user = store.get_user(user["id"])
-    return {"access_token": token, "token_type": "bearer", "user": public_user}
-
-
-@app.get("/api/v1/auth/me")
-def auth_me(user: Annotated[dict, Depends(require_admin)]):
-    return user
-
-
-# --- Admin users (super_admin only) ---
-
-@app.get("/api/v1/admin/users")
-def list_admin_users(_: Annotated[dict, Depends(require_super_admin)]):
-    return {"items": store.list_users(roles=["admin", "super_admin"])}
-
-
-@app.post("/api/v1/admin/users", status_code=201)
-def create_admin_user(body: CreateAdminRequest, current: Annotated[dict, Depends(require_super_admin)]):
-    if store.get_user_by_email(body.email):
-        raise HTTPException(409, "Email already registered")
-    user = store.create_user(
-        email=body.email,
-        password=body.password,
-        full_name=body.full_name,
-        role="admin",
-        created_by=current["id"],
-    )
-    return user
-
-
-# --- Catalog hierarchy ---
-
-@app.get("/api/v1/catalog/tree")
-def catalog_tree(request: Request, _: Annotated[dict, Depends(require_admin)]):
-    if remote_api_configured():
-        try:
-            return _remote_client_from_request(request).request_json("GET", "/api/v1/catalog/tree")
-        except RemoteApiError as exc:
-            raise HTTPException(503, str(exc)) from exc
-    return {"items": store.get_catalog_tree()}
-
-
-@app.get("/api/v1/public/catalog/tree")
-def public_catalog_tree():
-    return {"items": store.get_catalog_tree()}
-
-
-@app.get("/api/v1/catalog/hero/{entity_type}/{entity_id}")
-def get_catalog_hero(entity_type: str, entity_id: str):
-    if entity_type not in CATALOG_ENTITY_TYPES:
-        raise HTTPException(404, "Unknown catalog entity type")
-    if not _catalog_entity_exists(entity_type, entity_id):
-        raise HTTPException(404, "Catalog item not found")
-    custom_path = store.get_catalog_hero_path(entity_type, entity_id)
-    if custom_path:
-        hero_file = Path(custom_path)
-        if hero_file.is_file():
-            return FileResponse(hero_file, media_type=_hero_media_type(hero_file))
-    default_file = default_hero_file(entity_type)
-    return FileResponse(default_file, media_type="image/svg+xml")
-
-
-@app.post("/api/v1/catalog/{entity_type}/{entity_id}/hero")
-async def upload_catalog_hero(
-    entity_type: str,
-    entity_id: str,
-    _: Annotated[dict, Depends(require_admin)],
-    file: UploadFile = File(...),
-):
-    if entity_type not in CATALOG_ENTITY_TYPES:
-        raise HTTPException(404, "Unknown catalog entity type")
-    if not _catalog_entity_exists(entity_type, entity_id):
-        raise HTTPException(404, "Catalog item not found")
-
-    filename = Path(file.filename or "hero.jpg").name
-    ext = Path(filename).suffix.lower()
-    if ext not in ALLOWED_HERO_EXTENSIONS:
-        raise HTTPException(415, "Hero image must be JPG, PNG, WebP, or SVG")
-
-    entity_dir = HERO_ROOT / entity_type
-    entity_dir.mkdir(parents=True, exist_ok=True)
-    destination = entity_dir / f"{entity_id}{ext}"
-
-    limit = 10 * 1024 * 1024
-    total = 0
-    try:
-        with destination.open("wb") as out:
-            while chunk := await file.read(1024 * 1024):
-                total += len(chunk)
-                if total > limit:
-                    raise HTTPException(413, "Hero image exceeds 10 MB limit")
-                out.write(chunk)
-    except HTTPException:
-        destination.unlink(missing_ok=True)
-        raise
-    except Exception as exc:
-        destination.unlink(missing_ok=True)
-        raise HTTPException(500, f"Failed to save hero image: {exc}") from exc
-
-    for other_ext in ALLOWED_HERO_EXTENSIONS:
-        if other_ext != ext:
-            (entity_dir / f"{entity_id}{other_ext}").unlink(missing_ok=True)
-
-    updated = store.set_catalog_hero_path(entity_type, entity_id, str(destination))
-    if not updated:
-        destination.unlink(missing_ok=True)
-        raise HTTPException(404, "Catalog item not found")
-    return updated
-
-
-@app.delete("/api/v1/catalog/{entity_type}/{entity_id}/hero")
-def delete_catalog_hero(
-    entity_type: str,
-    entity_id: str,
-    _: Annotated[dict, Depends(require_admin)],
-):
-    if entity_type not in CATALOG_ENTITY_TYPES:
-        raise HTTPException(404, "Unknown catalog entity type")
-    custom_path = store.get_catalog_hero_path(entity_type, entity_id)
-    if custom_path:
-        Path(custom_path).unlink(missing_ok=True)
-    updated = store.set_catalog_hero_path(entity_type, entity_id, None)
-    if not updated:
-        raise HTTPException(404, "Catalog item not found")
-    return updated
-
-
-@app.get("/api/v1/catalog/countries")
-def list_countries(_: Annotated[dict, Depends(require_admin)]):
-    return {"items": store.list_countries()}
-
-
-@app.get("/api/v1/catalog/countries/{country_id}")
-def get_country(country_id: str, _: Annotated[dict, Depends(require_admin)]):
-    country = store.get_country(country_id)
-    if not country:
-        raise HTTPException(404, "Country not found")
-    return country
-
-
-@app.post("/api/v1/catalog/countries", status_code=201)
-def create_country(body: CreateCountryRequest, _: Annotated[dict, Depends(require_admin)]):
-    return _catalog_write(
-        lambda: store.create_country(
-            name=body.name,
-            name_ar=body.name_ar,
-            code=body.code,
-            seo=body.seo_payload(),
-        )
-    )
-
-
-@app.patch("/api/v1/catalog/countries/{country_id}")
-def update_country(country_id: str, body: UpdateCatalogItemRequest, _: Annotated[dict, Depends(require_admin)]):
-    if not body.has_catalog_updates():
-        raise HTTPException(422, "No fields to update")
-    updated = _catalog_write(
-        lambda: store.update_country(
-            country_id,
-            name=body.name,
-            name_ar=body.name_ar,
-            code=body.code,
-            seo=body.seo_updates(),
-        )
-    )
-    if not updated:
-        raise HTTPException(404, "Country not found")
-    return updated
-
-
-@app.delete("/api/v1/catalog/countries/{country_id}", status_code=204)
-def delete_country(country_id: str, _: Annotated[dict, Depends(require_admin)]):
-    if not store.deactivate_country(country_id):
-        raise HTTPException(404, "Country not found")
-
-
-@app.get("/api/v1/catalog/education-systems")
-def list_education_systems(
-    _: Annotated[dict, Depends(require_admin)],
-    country_id: str | None = None,
-):
-    return {"items": store.list_education_systems(country_id=country_id)}
-
-
-@app.get("/api/v1/catalog/education-systems/{system_id}")
-def get_education_system(system_id: str, _: Annotated[dict, Depends(require_admin)]):
-    system = store.get_education_system(system_id)
-    if not system:
-        raise HTTPException(404, "Education system not found")
-    return system
-
-
-@app.post("/api/v1/catalog/education-systems", status_code=201)
-def create_education_system(body: CreateEducationSystemRequest, _: Annotated[dict, Depends(require_admin)]):
-    if not store.get_country(body.country_id):
-        raise HTTPException(404, "Country not found")
-    return _catalog_write(
-        lambda: store.create_education_system(
-            country_id=body.country_id,
-            name=body.name,
-            name_ar=body.name_ar,
-            seo=body.seo_payload(),
-        )
-    )
-
-
-@app.patch("/api/v1/catalog/education-systems/{system_id}")
-def update_education_system(
-    system_id: str, body: UpdateCatalogItemRequest, _: Annotated[dict, Depends(require_admin)]
-):
-    if not body.has_catalog_updates():
-        raise HTTPException(422, "No fields to update")
-    updated = _catalog_write(
-        lambda: store.update_education_system(
-            system_id,
-            name=body.name,
-            name_ar=body.name_ar,
-            seo=body.seo_updates(),
-        )
-    )
-    if not updated:
-        raise HTTPException(404, "Education system not found")
-    return updated
-
-
-@app.delete("/api/v1/catalog/education-systems/{system_id}", status_code=204)
-def delete_education_system(system_id: str, _: Annotated[dict, Depends(require_admin)]):
-    if not store.deactivate_education_system(system_id):
-        raise HTTPException(404, "Education system not found")
-
-
-@app.get("/api/v1/catalog/grades")
-def list_grades(
-    _: Annotated[dict, Depends(require_admin)],
-    education_system_id: str | None = None,
-):
-    return {"items": store.list_grades(education_system_id=education_system_id)}
-
-
-@app.get("/api/v1/catalog/grades/{grade_id}")
-def get_grade(grade_id: str, _: Annotated[dict, Depends(require_admin)]):
-    grade = store.get_grade(grade_id)
-    if not grade:
-        raise HTTPException(404, "Grade not found")
-    return grade
-
-
-@app.post("/api/v1/catalog/grades", status_code=201)
-def create_grade(body: CreateGradeRequest, _: Annotated[dict, Depends(require_admin)]):
-    if not store.get_education_system(body.education_system_id):
-        raise HTTPException(404, "Education system not found")
-    return _catalog_write(
-        lambda: store.create_grade(
-            education_system_id=body.education_system_id,
-            name=body.name,
-            name_ar=body.name_ar,
-            sort_order=body.sort_order,
-            seo=body.seo_payload(),
-        )
-    )
-
-
-@app.patch("/api/v1/catalog/grades/{grade_id}")
-def update_grade(grade_id: str, body: UpdateCatalogItemRequest, _: Annotated[dict, Depends(require_admin)]):
-    if not body.has_catalog_updates():
-        raise HTTPException(422, "No fields to update")
-    updated = _catalog_write(
-        lambda: store.update_grade(
-            grade_id,
-            name=body.name,
-            name_ar=body.name_ar,
-            sort_order=body.sort_order,
-            seo=body.seo_updates(),
-        )
-    )
-    if not updated:
-        raise HTTPException(404, "Grade not found")
-    return updated
-
-
-@app.delete("/api/v1/catalog/grades/{grade_id}", status_code=204)
-def delete_grade(grade_id: str, _: Annotated[dict, Depends(require_admin)]):
-    if not store.deactivate_grade(grade_id):
-        raise HTTPException(404, "Grade not found")
-
-
-@app.get("/api/v1/catalog/subjects")
-def list_subjects(_: Annotated[dict, Depends(require_admin)], grade_id: str | None = None):
-    return {"items": store.list_subjects(grade_id=grade_id)}
-
-
-@app.get("/api/v1/catalog/subjects/{subject_id}")
-def get_subject(subject_id: str, _: Annotated[dict, Depends(require_admin)]):
-    subject = store.get_subject(subject_id)
-    if not subject:
-        raise HTTPException(404, "Subject not found")
-    return subject
-
-
-@app.post("/api/v1/catalog/subjects", status_code=201)
-def create_subject(body: CreateSubjectRequest, _: Annotated[dict, Depends(require_admin)]):
-    if not store.get_grade(body.grade_id):
-        raise HTTPException(404, "Grade not found")
-    return _catalog_write(
-        lambda: store.create_subject(
-            grade_id=body.grade_id,
-            name=body.name,
-            name_ar=body.name_ar,
-            seo=body.seo_payload(),
-        )
-    )
-
-
-@app.patch("/api/v1/catalog/subjects/{subject_id}")
-def update_subject(subject_id: str, body: UpdateCatalogItemRequest, _: Annotated[dict, Depends(require_admin)]):
-    if not body.has_catalog_updates():
-        raise HTTPException(422, "No fields to update")
-    updated = _catalog_write(
-        lambda: store.update_subject(
-            subject_id,
-            name=body.name,
-            name_ar=body.name_ar,
-            seo=body.seo_updates(),
-        )
-    )
-    if not updated:
-        raise HTTPException(404, "Subject not found")
-    return updated
-
-
-@app.delete("/api/v1/catalog/subjects/{subject_id}")
-def delete_subject(subject_id: str, _: Annotated[dict, Depends(require_admin)]):
-    if not store.get_subject(subject_id):
-        raise HTTPException(404, "Subject not found")
-    book_count = store.count_books_for_subject(subject_id)
-    if not store.deactivate_subject(subject_id):
-        raise HTTPException(404, "Subject not found")
-    return {"deleted": True, "linked_books": book_count}
-
-
-# --- Books ---
 
 @app.post("/api/v1/books", status_code=201)
 async def upload_book(
     request: Request,
-    user: Annotated[dict, Depends(require_admin)],
+    _: Annotated[dict, Depends(require_admin)],
     file: UploadFile = File(...),
     subject_id: str = Form(...),
     metadata: str = Form("{}"),
 ):
-    if remote_api_configured():
-        if not store.get_subject(subject_id):
-            try:
-                _remote_client_from_request(request).request_json("GET", f"/api/v1/catalog/subjects/{subject_id}")
-            except RemoteApiError as exc:
-                raise HTTPException(404, f"Subject not found on remote catalog: {exc}") from exc
-    elif not store.get_subject(subject_id):
-        raise HTTPException(404, "Subject not found in catalog")
+    try:
+        _remote_client_from_request(request).request_json("GET", f"/api/v1/catalog/subjects/{subject_id}")
+    except RemoteApiError as exc:
+        raise HTTPException(404, f"Subject not found on remote catalog: {exc}") from exc
+
     filename = Path(file.filename or "book.pdf").name
     if not filename.casefold().endswith(".pdf"):
         raise HTTPException(415, "Only PDF textbook uploads are accepted")
@@ -621,11 +190,7 @@ async def upload_book(
         raise HTTPException(422, f"Invalid metadata JSON: {exc}") from exc
 
     try:
-        metadata_obj.update(
-            _catalog_metadata(subject_id)
-            if not remote_api_configured()
-            else remote_catalog_metadata(_remote_client_from_request(request), subject_id)
-        )
+        metadata_obj.update(remote_catalog_metadata(_remote_client_from_request(request), subject_id))
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -668,22 +233,21 @@ async def upload_book(
         sha256=h.hexdigest(),
         metadata=metadata_obj,
         subject_id=subject_id,
-        created_by=None if remote_api_configured() else user.get("id"),
+        created_by=None,
     )
-    if remote_api_configured():
-        try:
-            _remote_client_from_request(request).register_book(
-                resource_id=resource_id,
-                subject_id=subject_id,
-                original_filename=filename,
-                size_bytes=total,
-                sha256=h.hexdigest(),
-                metadata=metadata_obj,
-            )
-        except RemoteApiError as exc:
-            store.delete_book(resource_id)
-            shutil.rmtree(book_dir, ignore_errors=True)
-            raise HTTPException(502, f"Failed to register book on remote server: {exc}") from exc
+    try:
+        _remote_client_from_request(request).register_book(
+            resource_id=resource_id,
+            subject_id=subject_id,
+            original_filename=filename,
+            size_bytes=total,
+            sha256=h.hexdigest(),
+            metadata=metadata_obj,
+        )
+    except RemoteApiError as exc:
+        store.delete_book(resource_id)
+        shutil.rmtree(book_dir, ignore_errors=True)
+        raise HTTPException(502, f"Failed to register book on remote server: {exc}") from exc
     return _public_book(book)
 
 
@@ -721,18 +285,6 @@ def delete_book(resource_id: str, _: Annotated[dict, Depends(require_admin)]):
         output_dir = job.get("output_dir")
         if output_dir:
             shutil.rmtree(output_dir, ignore_errors=True)
-    book_ids = [job.get("book_id") for job in jobs if job.get("book_id")]
-    if book_ids:
-        try:
-            from remote_lessons_gpt.opensearch_index import create_client
-
-            create_client().delete_by_query(
-                index=settings.opensearch_index,
-                body={"query": {"terms": {"book_id": book_ids}}},
-                refresh=True,
-            )
-        except Exception:
-            pass
     return {"deleted": True, "deleted_jobs": len(jobs)}
 
 
@@ -746,40 +298,38 @@ def create_extraction_job(
     book = store.get_book(resource_id)
     if not book:
         raise HTTPException(404, "Book not found")
+
+    remote_token = _bearer_token(http_request)
+    if not remote_token:
+        raise HTTPException(401, "Remote ingest requires a valid login token")
+
     job_id = uuid.uuid4().hex
     output_dir = JOBS_ROOT / job_id
     output_dir.mkdir(parents=True, exist_ok=False)
     metadata = dict(request.metadata_overrides or {})
     metadata["language_hint"] = request.language_hint
 
-    remote_token = _bearer_token(http_request)
-    sync_to_remote = bool(request.sync_to_remote)
-    if sync_to_remote and remote_api_configured():
-        if not remote_token:
-            raise HTTPException(401, "Remote sync requires a valid login token")
-        from remote_lessons_gpt.schemas import BookMetadata
-        from extractor_lessons_gpt.opensearch_indexer import book_id_for_pdf
+    from remote_lessons_gpt.schemas import BookMetadata
+    from extractor_lessons_gpt.opensearch_indexer import book_id_for_pdf
 
-        book_metadata = BookMetadata.model_validate(dict(book.get("metadata") or {}))
-        book_metadata_data = book_metadata.model_dump()
-        book_metadata_data.update(metadata)
-        book_metadata = BookMetadata.model_validate(book_metadata_data)
-        book_id = book_id_for_pdf(Path(book["stored_path"]), book_metadata)
-        try:
-            RemoteIngestClient(remote_token).create_job(
-                job_id=job_id,
-                book_resource_id=resource_id,
-                book_id=book_id,
-                start_page=request.start_page,
-                end_page=request.end_page,
-                extractor_backend=request.extractor_backend,
-                metadata=metadata,
-            )
-        except RemoteApiError as exc:
-            shutil.rmtree(output_dir, ignore_errors=True)
-            raise HTTPException(502, f"Failed to create remote ingestion job: {exc}") from exc
-    elif sync_to_remote and not remote_api_configured():
-        raise HTTPException(503, "REMOTE_API_URL is not configured on the local extractor")
+    book_metadata = BookMetadata.model_validate(dict(book.get("metadata") or {}))
+    book_metadata_data = book_metadata.model_dump()
+    book_metadata_data.update(metadata)
+    book_metadata = BookMetadata.model_validate(book_metadata_data)
+    book_id = book_id_for_pdf(Path(book["stored_path"]), book_metadata)
+    try:
+        RemoteIngestClient(remote_token).create_job(
+            job_id=job_id,
+            book_resource_id=resource_id,
+            book_id=book_id,
+            start_page=request.start_page,
+            end_page=request.end_page,
+            extractor_backend=request.extractor_backend,
+            metadata=metadata,
+        )
+    except RemoteApiError as exc:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise HTTPException(502, f"Failed to create remote ingestion job: {exc}") from exc
 
     job = store.create_job(
         job_id=job_id,
@@ -788,13 +338,13 @@ def create_extraction_job(
         start_page=request.start_page,
         end_page=request.end_page,
         resume=request.resume,
-        index_to_opensearch=request.index_to_opensearch,
-        recreate_index=request.recreate_index,
+        index_to_opensearch=False,
+        recreate_index=False,
         metadata_overrides=metadata,
         extractor_backend=request.extractor_backend,
-        sync_to_remote=sync_to_remote,
+        sync_to_remote=True,
         remote_job_id=job_id,
-        remote_auth_token=remote_token if sync_to_remote else None,
+        remote_auth_token=remote_token,
     )
     return _public_job(job)
 
@@ -854,8 +404,7 @@ def retry_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
 
 @app.delete("/api/v1/jobs/{job_id}")
 def delete_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
-    job = store.get_job(job_id)
-    if not job:
+    if not store.get_job(job_id):
         raise HTTPException(404, "Job not found")
     result = store.delete_job(job_id)
     if not result:
@@ -864,29 +413,9 @@ def delete_job(job_id: str, _: Annotated[dict, Depends(require_admin)]):
         raise HTTPException(409, "Stop the job before deleting it")
     deleted_job = result["job"]
     output_dir = deleted_job.get("output_dir")
-    doc_ids: list[str] = []
-    jsonl_path = Path(str(output_dir)) / "index" / "documents.jsonl" if output_dir else None
-    if jsonl_path and jsonl_path.exists():
-        for line in jsonl_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if payload.get("id"):
-                doc_ids.append(str(payload["id"]))
     if output_dir:
         shutil.rmtree(output_dir, ignore_errors=True)
-    if doc_ids:
-        try:
-            from remote_lessons_gpt.opensearch_index import create_client, delete_documents
-
-            delete_documents(create_client(), settings.opensearch_index, doc_ids)
-        except Exception:
-            pass
-    return {"deleted": True, "job_id": job_id, "deleted_index_docs": len(doc_ids)}
+    return {"deleted": True, "job_id": job_id}
 
 
 @app.get("/api/v1/jobs/{job_id}/events")
@@ -984,140 +513,3 @@ def get_artifact(job_id: str, relative_path: str, _: Annotated[dict, Depends(req
     if not requested.exists() or not requested.is_file():
         raise HTTPException(404, "Artifact not found")
     return FileResponse(requested)
-
-
-@app.post("/api/v1/search")
-def search_content(request: Request, body: SearchRequest, _: Annotated[dict, Depends(require_admin)]):
-    if remote_api_configured():
-        try:
-            return _remote_client_from_request(request).request_json(
-                "POST",
-                "/api/v1/search",
-                json=body.model_dump(mode="json"),
-            )
-        except RemoteApiError as exc:
-            raise HTTPException(503, str(exc)) from exc
-    try:
-        filters = dict(body.filters or {})
-        book_key = filters.get("book_id")
-        if book_key:
-            ids = [str(book_key)]
-            jobs = store.list_jobs(book_resource_id=str(book_key), limit=50)
-            for job in jobs:
-                if job.get("book_id"):
-                    ids.append(str(job["book_id"]))
-            filters["book_id"] = list(dict.fromkeys(ids))
-        items = _search_service().search(body.query, filters, size=body.size)
-        return {"items": items}
-    except Exception as exc:
-        raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
-
-
-@app.get("/api/v1/indexed-books/{book_id}/pages/{page}")
-def indexed_page(book_id: str, page: str, _: Annotated[dict, Depends(require_admin)]):
-    try:
-        return {"items": _search_service().exact_page(book_id, page)}
-    except Exception as exc:
-        raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
-
-
-@app.get("/api/v1/indexed-books/{book_id}/outline")
-def indexed_book_outline(book_id: str, _: Annotated[dict, Depends(require_admin)]):
-    try:
-        ids = [book_id]
-        jobs = store.list_jobs(book_resource_id=book_id, limit=50)
-        for job in jobs:
-            if job.get("book_id"):
-                ids.append(str(job["book_id"]))
-        for candidate in dict.fromkeys(ids):
-            outline = _search_service().book_outline(str(candidate))
-            if outline.get("chapters"):
-                outline["book_id"] = book_id
-                return outline
-        return {"book_id": book_id, "chapters": []}
-    except Exception as exc:
-        raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
-
-
-@app.get("/api/v1/indexed-books/{book_id}/questions/{page}/{number}")
-def indexed_question(book_id: str, page: str, number: str, _: Annotated[dict, Depends(require_admin)]):
-    try:
-        return {"items": _search_service().find_question(book_id, page, number)}
-    except Exception as exc:
-        raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
-
-
-@app.post("/api/v1/indexed-books/{book_id}/questions/search")
-def indexed_question_search(book_id: str, request: QuestionSearchRequest, _: Annotated[dict, Depends(require_admin)]):
-    try:
-        items = _search_service().find_questions(
-            book_id=book_id,
-            query=request.query,
-            scope=request.scope,
-            question_format=request.question_format,
-            purpose=request.purpose,
-            bloom_level=request.bloom_level,
-            difficulty=request.difficulty,
-            lesson_title=request.lesson_title,
-            chapter_title=request.chapter_title,
-            unit_title=request.unit_title,
-            requires_visual=request.requires_visual,
-            size=request.size,
-        )
-        return {"items": items}
-    except Exception as exc:
-        raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
-
-
-@app.get("/api/v1/indexed-questions/{question_id}/context")
-def indexed_question_context(question_id: str, _: Annotated[dict, Depends(require_admin)], radius: int = Query(2, ge=0, le=10)):
-    try:
-        result = _search_service().get_question_context(question_id, radius=radius)
-        if result is None:
-            raise HTTPException(404, "Question not found")
-        return result
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
-
-
-@app.get("/api/v1/indexed-assets/{asset_id}")
-def indexed_asset(asset_id: str, _: Annotated[dict, Depends(require_admin)]):
-    try:
-        result = _search_service().get_asset(asset_id)
-        if result is None:
-            raise HTTPException(404, "Asset not found")
-        return result
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(503, f"OpenSearch query failed: {exc}") from exc
-
-
-@app.post("/api/v1/sync/books/{book_id}")
-def sync_book_to_remote(
-    book_id: str,
-    request: RemoteSyncRequest,
-    _: Annotated[dict, Depends(require_admin)],
-):
-    if not remote_opensearch_configured():
-        raise HTTPException(503, "Remote OpenSearch is not configured")
-    try:
-        synced, errors = sync_book_documents_from_local(book_id, recreate_index=request.recreate_index)
-        return {"book_id": book_id, "synced_records": synced, "errors": len(errors)}
-    except Exception as exc:
-        raise HTTPException(503, f"Remote sync failed: {exc}") from exc
-
-
-@app.get("/api/v1/sync/status")
-def sync_status(_: Annotated[dict, Depends(require_admin)]):
-    from extractor_lessons_gpt.config import settings as px_settings
-
-    return {
-        "remote_opensearch_configured": remote_opensearch_configured(),
-        "local_opensearch_url": px_settings.opensearch_url,
-        "remote_opensearch_url": px_settings.remote_opensearch_url or None,
-        "local_index": px_settings.opensearch_index,
-        "remote_index": px_settings.remote_opensearch_index or px_settings.opensearch_index,
-    }

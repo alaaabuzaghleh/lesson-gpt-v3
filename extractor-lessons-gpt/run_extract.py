@@ -69,8 +69,7 @@ def run(
 def doctor(
     backend: str = typer.Option(settings.extractor_backend, "--backend", "-b"),
 ):
-    """Verify extractor backend, schema, and OpenSearch connectivity."""
-    from extractor_lessons_gpt.opensearch_indexer import OpenSearchIndexer
+    """Verify extractor backend, schema, and optional remote API config."""
     from extractor_lessons_gpt.runner_factory import make_page_runner
 
     make_page_runner(settings, backend)
@@ -80,9 +79,10 @@ def doctor(
     else:
         typer.echo(f"VLM: {settings.vlm_model} @ {settings.vlm_base_url}")
     typer.echo(f"Schema: {settings.page_schema}")
-    if settings.index_to_opensearch:
-        OpenSearchIndexer(settings)
-        typer.echo(f"OpenSearch: {settings.opensearch_url} index={settings.opensearch_index}")
+    if not settings.remote_api_url:
+        typer.echo("REMOTE_API_URL: not set (required for run_api.py / admin workflow)")
+    else:
+        typer.echo(f"Remote API: {settings.remote_api_url}")
     typer.echo("OK")
 
 

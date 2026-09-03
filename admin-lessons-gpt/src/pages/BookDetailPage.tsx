@@ -25,9 +25,7 @@ export function BookDetailPage() {
   const [deleting, setDeleting] = useState(false)
   const [startPage, setStartPage] = useState(1)
   const [endPage, setEndPage] = useState('')
-  const [indexToOs, setIndexToOs] = useState(true)
   const [extractorBackend, setExtractorBackend] = useState<'local' | 'codex'>('local')
-  const [syncToRemote, setSyncToRemote] = useState(true)
 
   const load = useCallback(async () => {
     if (!resourceId) return
@@ -59,10 +57,10 @@ export function BookDetailPage() {
         start_page: startPage,
         end_page: endPage ? parseInt(endPage, 10) : null,
         resume: true,
-        index_to_opensearch: indexToOs,
+        index_to_opensearch: false,
         recreate_index: false,
         extractor_backend: extractorBackend,
-        sync_to_remote: syncToRemote,
+        sync_to_remote: true,
       })
       window.location.href = `/jobs/${job.job_id}`
     } catch (e) {
@@ -135,10 +133,6 @@ export function BookDetailPage() {
               placeholder={t.bookDetail.allPages}
               hint={t.bookDetail.endPageHint}
             />
-            <label className="checkbox-row">
-              <input type="checkbox" checked={indexToOs} onChange={(e) => setIndexToOs(e.target.checked)} />
-              {t.bookDetail.indexOpenSearch}
-            </label>
             <label className="field-label" htmlFor="extractor-backend">محرك الاستخراج</label>
             <select
               id="extractor-backend"
@@ -149,10 +143,7 @@ export function BookDetailPage() {
               <option value="local">محلي (Ollama)</option>
               <option value="codex">Codex (ChatGPT.app)</option>
             </select>
-            <label className="checkbox-row">
-              <input type="checkbox" checked={syncToRemote} onChange={(e) => setSyncToRemote(e.target.checked)} />
-              نشر كل صفحة على الخادم البعيد (PostgreSQL + OpenSearch) للطلاب
-            </label>
+            <p className="muted">يتم نشر كل صفحة على الخادم البعيد (PostgreSQL + OpenSearch) عبر واجهة ingest الآمنة.</p>
             <button className="btn btn-primary" onClick={startExtraction} disabled={starting}>
               {starting ? t.bookDetail.starting : t.bookDetail.startJob}
             </button>

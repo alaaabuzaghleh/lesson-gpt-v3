@@ -23,11 +23,11 @@ class ExtractionJobRequest(BaseModel):
     start_page: int = Field(default=1, ge=1)
     end_page: int | None = Field(default=None, ge=1)
     resume: bool = True
-    index_to_opensearch: bool = True
+    index_to_opensearch: bool = False
     recreate_index: bool = False
     metadata_overrides: dict[str, Any] = Field(default_factory=dict)
     extractor_backend: ExtractorBackend = "local"
-    sync_to_remote: bool = False
+    sync_to_remote: bool = True
     language_hint: str = "Arabic mathematics textbook content"
 
     @model_validator(mode="after")

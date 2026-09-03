@@ -1,8 +1,9 @@
-# localLessonsGPT — external infrastructure
-# Postgres, OpenSearch, OpenSearch Dashboards, pgAdmin (PostgreSQL admin UI)
+# Shared infrastructure — PostgreSQL and OpenSearch
+# Only remote-lessons-gpt connects to these services (via Docker network).
+# Local extractors and admin UI must NOT access Postgres/OpenSearch directly.
 #
-# Start:  ./scripts/local up infra
-# Stop:   ./scripts/local down infra
+# Start:  cd local-lessons-gpt && ./scripts/local up infra
+# Stop:   cd local-lessons-gpt && ./scripts/local down infra
 
 name: lessons-gpt-infra
 

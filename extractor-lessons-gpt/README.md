@@ -8,11 +8,11 @@ Works with [adminLessonsGPT](../admin-lessons-gpt) on port 5173.
 
 ```
 adminLessonsGPT (:5173)
-    → extractorLessonsGPT (:8080)  — PDF storage, extraction worker
-    → remoteLessonsGPT             — auth, catalog, PostgreSQL, OpenSearch
+    → remoteLessonsGPT (:8081)     — auth, catalog, search, PostgreSQL, OpenSearch
+    → extractorLessonsGPT (:8080)  — local PDFs, extraction worker, remote ingest only
 ```
 
-Set `REMOTE_API_URL` in `.env` to your remoteLessonsGPT deployment.
+Set `REMOTE_API_URL` in `.env` to your remoteLessonsGPT deployment. The extractor **never** connects to PostgreSQL or OpenSearch directly.
 
 ## Quick start
 
@@ -40,11 +40,10 @@ API docs: http://localhost:8080/docs
 
 ```env
 REMOTE_API_URL=http://localhost:8081
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/lessons_gpt
-OPENSEARCH_URL=http://localhost:9200
 EXTRACTOR_BACKEND=local
 VLM_BASE_URL=http://localhost:11434/v1
 VLM_MODEL=qwen2.5vl:7b
+API_DATA_ROOT=./data
 ```
 
 ## CLI (optional)

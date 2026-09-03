@@ -27,18 +27,7 @@ class Settings:
     render_dpi: int
     output_dir: Path
     page_schema: Path
-    opensearch_url: str
-    opensearch_username: str
-    opensearch_password: str
-    opensearch_verify_certs: bool
-    opensearch_index: str
-    index_to_opensearch: bool
     extractor_backend: str
-    remote_opensearch_url: str
-    remote_opensearch_username: str
-    remote_opensearch_password: str
-    remote_opensearch_verify_certs: bool
-    remote_opensearch_index: str
     remote_api_url: str
     codex_page_delay_seconds: float
     codex_max_retries: int
@@ -54,6 +43,13 @@ class Settings:
     vlm_num_ctx: int
     vlm_max_retries: int
     local_page_delay_seconds: float
+    api_host: str
+    api_port: int
+    api_data_root: Path
+    api_worker_count: int
+    api_worker_poll_seconds: float
+    api_max_upload_mb: int
+    api_cors_origins: str
 
     @classmethod
     def load(cls) -> Settings:
@@ -68,18 +64,7 @@ class Settings:
             render_dpi=render_dpi,
             output_dir=output_dir,
             page_schema=page_schema,
-            opensearch_url=os.getenv("OPENSEARCH_URL", "http://localhost:9200"),
-            opensearch_username=os.getenv("OPENSEARCH_USERNAME", ""),
-            opensearch_password=os.getenv("OPENSEARCH_PASSWORD", ""),
-            opensearch_verify_certs=os.getenv("OPENSEARCH_VERIFY_CERTS", "false").lower() == "true",
-            opensearch_index=os.getenv("OPENSEARCH_INDEX", "school_book_content_v3"),
-            index_to_opensearch=os.getenv("INDEX_TO_OPENSEARCH", "true").lower() == "true",
             extractor_backend=os.getenv("EXTRACTOR_BACKEND", "local").strip().lower(),
-            remote_opensearch_url=os.getenv("REMOTE_OPENSEARCH_URL", ""),
-            remote_opensearch_username=os.getenv("REMOTE_OPENSEARCH_USERNAME", ""),
-            remote_opensearch_password=os.getenv("REMOTE_OPENSEARCH_PASSWORD", ""),
-            remote_opensearch_verify_certs=os.getenv("REMOTE_OPENSEARCH_VERIFY_CERTS", "false").lower() == "true",
-            remote_opensearch_index=os.getenv("REMOTE_OPENSEARCH_INDEX", os.getenv("OPENSEARCH_INDEX", "school_book_content_v3")),
             remote_api_url=os.getenv("REMOTE_API_URL", "").strip(),
             codex_page_delay_seconds=float(os.getenv("CODEX_PAGE_DELAY_SECONDS", "12")),
             codex_max_retries=int(os.getenv("CODEX_MAX_RETRIES", "12")),
@@ -95,6 +80,13 @@ class Settings:
             vlm_num_ctx=int(os.getenv("VLM_NUM_CTX", "16384")),
             vlm_max_retries=int(os.getenv("VLM_MAX_RETRIES", "3")),
             local_page_delay_seconds=float(os.getenv("LOCAL_PAGE_DELAY_SECONDS", "2")),
+            api_host=os.getenv("API_HOST", "0.0.0.0"),
+            api_port=int(os.getenv("API_PORT", "8080")),
+            api_data_root=Path(os.getenv("API_DATA_ROOT", "./data")).expanduser(),
+            api_worker_count=int(os.getenv("API_WORKER_COUNT", "1")),
+            api_worker_poll_seconds=float(os.getenv("API_WORKER_POLL_SECONDS", "0.5")),
+            api_max_upload_mb=int(os.getenv("API_MAX_UPLOAD_MB", "1024")),
+            api_cors_origins=os.getenv("API_CORS_ORIGINS", "*"),
         )
 
 

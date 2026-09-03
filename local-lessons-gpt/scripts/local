@@ -14,18 +14,27 @@ set -euo pipefail
 
 LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 MONO_ROOT="$(cd "$LOCAL_DIR/.." && pwd)"
-INFRA="$LOCAL_DIR/docker-compose.infra.yml"
+INFRA="$MONO_ROOT/infra/docker-compose.yml"
 APPS="$LOCAL_DIR/docker-compose.apps.yml"
+REMOTE_ENV="$MONO_ROOT/remote-lessons-gpt/.env"
+LOCAL_ENV="$LOCAL_DIR/.env"
 
-ENV_FILE="$LOCAL_DIR/.env"
-if [[ -f "$ENV_FILE" ]]; then
-  COMPOSE_ENV=(--env-file "$ENV_FILE")
-else
-  COMPOSE_ENV=()
-fi
+dc_infra() {
+  local args=()
+  [[ -f "$LOCAL_ENV" ]] && args+=(--env-file "$LOCAL_ENV")
+  docker compose "${args[@]}" -f "$INFRA" "$@"
+}
 
-dc_infra() { docker compose "${COMPOSE_ENV[@]}" -f "$INFRA" "$@"; }
-dc_apps() { docker compose "${COMPOSE_ENV[@]}" -f "$APPS" "$@"; }
+dc_apps() {
+  local args=()
+  if [[ ! -f "$REMOTE_ENV" ]]; then
+    echo "Missing $REMOTE_ENV — run: cp $MONO_ROOT/remote-lessons-gpt/.env.example $REMOTE_ENV" >&2
+    exit 1
+  fi
+  args+=(--env-file "$REMOTE_ENV")
+  [[ -f "$LOCAL_ENV" ]] && args+=(--env-file "$LOCAL_ENV")
+  docker compose "${args[@]}" -f "$APPS" "$@"
+}
 
 usage() {
   sed -n '3,12p' "$0" | sed 's/^# \?//'

@@ -1,8 +1,8 @@
 # localLessonsGPT — application services (Docker)
-# remoteLessonsGPT API — requires infra network from docker-compose.infra.yml
+# remoteLessonsGPT API — requires infra network from ../infra/docker-compose.yml
 #
+# Config: ../remote-lessons-gpt/.env (auth, index, workers)
 # Start:  ./scripts/local up apps
-# Stop:   ./scripts/local down apps
 
 name: lessons-gpt-apps
 
@@ -12,24 +12,16 @@ services:
       context: ../remote-lessons-gpt
       dockerfile: Dockerfile
     container_name: lessons-gpt-remote-api
+    env_file:
+      - ../remote-lessons-gpt/.env
     environment:
+      # Docker infra hostnames (override localhost URLs from remote .env)
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/lessons_gpt
       OPENSEARCH_URL: http://opensearch:9200
-      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-school_book_content_v3}
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-long-random-string}
-      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-480}
-      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-superadmin@lessonsgpt.com}
-      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-SuperAdmin123!}
-      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
       API_HOST: 0.0.0.0
       API_PORT: 8080
       API_DATA_ROOT: /app/data
-      API_WORKER_COUNT: ${API_WORKER_COUNT:-2}
-      API_MAX_UPLOAD_MB: ${API_MAX_UPLOAD_MB:-1024}
       API_CORS_ORIGINS: "*"
-      MINERU_ENABLED: ${MINERU_ENABLED:-false}
-      MINERU_REQUIRED: ${MINERU_REQUIRED:-false}
-      VLM_PAGE_EXTRACTION_ENABLED: ${VLM_PAGE_EXTRACTION_ENABLED:-false}
     ports:
       - "${REMOTE_API_HOST_PORT:-8081}:8080"
     volumes:

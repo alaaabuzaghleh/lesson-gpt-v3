@@ -6,7 +6,7 @@ Dev orchestration for the Lessons GPT monorepo. Runs **infrastructure in Docker*
 
 | Stack | File | Services |
 |-------|------|----------|
-| **External (infra)** | `docker-compose.infra.yml` | Postgres, OpenSearch, OpenSearch Dashboards, pgAdmin |
+| **External (infra)** | `../infra/docker-compose.yml` | Postgres, OpenSearch, OpenSearch Dashboards, pgAdmin |
 | **Internal (apps)** | `docker-compose.apps.yml` | remoteLessonsGPT API |
 
 Both share the Docker network `lessons-gpt`.
@@ -15,7 +15,8 @@ Both share the Docker network `lessons-gpt`.
 
 ```bash
 cd local-lessons-gpt
-cp .env.example .env          # optional overrides
+cp .env.example .env                              # optional orchestration overrides
+cp ../remote-lessons-gpt/.env.example ../remote-lessons-gpt/.env
 chmod +x scripts/local scripts/start-dev.sh
 
 ./scripts/local up infra        # Postgres + OpenSearch + Dashboards + pgAdmin
@@ -76,7 +77,7 @@ Login: http://localhost:5173/login — `superadmin@lessonsgpt.com` / `SuperAdmin
 ## Architecture
 
 ```
-┌─ docker-compose.infra.yml (external) ─────────────────────┐
+┌─ infra/docker-compose.yml (external) ─────────────────────┐
 │  Postgres :5432  │  OpenSearch :9200  │  Dashboards :5601 │
 │  pgAdmin :5050                                            │
 └───────────────────────────┬───────────────────────────────┘

@@ -1,4 +1,4 @@
-from remote_lessons_gpt.config import settings
+from extractor_lessons_gpt.config import settings
 
 if __name__ == "__main__":
     import uvicorn

@@ -17,7 +17,8 @@ import type {
   User,
 } from '../types/api'
 
-const BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
+const REMOTE_BASE = (import.meta.env.VITE_REMOTE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '/remote-api'
+const EXTRACTOR_BASE = (import.meta.env.VITE_EXTRACTOR_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 
 let authToken: string | null = null
 
@@ -31,8 +32,8 @@ function authHeaders(extra?: HeadersInit): HeadersInit {
   return { ...headers, ...(extra as Record<string, string> | undefined) }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+async function request<T>(base: string, path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${base}${path}`, {
     ...init,
     headers: authHeaders(init?.headers as HeadersInit),
   })
@@ -50,53 +51,56 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+const remote = <T>(path: string, init?: RequestInit) => request<T>(REMOTE_BASE, path, init)
+const extractor = <T>(path: string, init?: RequestInit) => request<T>(EXTRACTOR_BASE, path, init)
+
 export const api = {
   login: (email: string, password: string) =>
-    request<AuthResponse>('/api/v1/auth/login', {
+    remote<AuthResponse>('/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
     }),
 
-  me: () => request<User>('/api/v1/auth/me'),
+  me: () => remote<User>('/api/v1/auth/me'),
 
-  listAdminUsers: () => request<{ items: User[] }>('/api/v1/admin/users'),
+  listAdminUsers: () => remote<{ items: User[] }>('/api/v1/admin/users'),
 
   createAdmin: (body: { email: string; password: string; full_name: string }) =>
-    request<User>('/api/v1/admin/users', {
+    remote<User>('/api/v1/admin/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
 
   catalogTree: () =>
-    request<{ items: Country[] }>(`/api/v1/catalog/tree?t=${Date.now()}`),
+    remote<{ items: Country[] }>(`/api/v1/catalog/tree?t=${Date.now()}`),
 
-  listCountries: () => request<{ items: Country[] }>('/api/v1/catalog/countries'),
+  listCountries: () => remote<{ items: Country[] }>('/api/v1/catalog/countries'),
 
   listEducationSystems: (countryId?: string) => {
     const q = countryId ? `?country_id=${encodeURIComponent(countryId)}` : ''
-    return request<{ items: EducationSystem[] }>(`/api/v1/catalog/education-systems${q}`)
+    return remote<{ items: EducationSystem[] }>(`/api/v1/catalog/education-systems${q}`)
   },
 
   listGrades: (educationSystemId?: string) => {
     const q = educationSystemId ? `?education_system_id=${encodeURIComponent(educationSystemId)}` : ''
-    return request<{ items: Grade[] }>(`/api/v1/catalog/grades${q}`)
+    return remote<{ items: Grade[] }>(`/api/v1/catalog/grades${q}`)
   },
 
   listSubjects: (gradeId?: string) => {
     const q = gradeId ? `?grade_id=${encodeURIComponent(gradeId)}` : ''
-    return request<{ items: Subject[] }>(`/api/v1/catalog/subjects${q}`)
+    return remote<{ items: Subject[] }>(`/api/v1/catalog/subjects${q}`)
   },
 
-  getCountry: (id: string) => request<Country>(`/api/v1/catalog/countries/${id}`),
+  getCountry: (id: string) => remote<Country>(`/api/v1/catalog/countries/${id}`),
 
   getEducationSystem: (id: string) =>
-    request<EducationSystem>(`/api/v1/catalog/education-systems/${id}`),
+    remote<EducationSystem>(`/api/v1/catalog/education-systems/${id}`),
 
-  getGrade: (id: string) => request<Grade>(`/api/v1/catalog/grades/${id}`),
+  getGrade: (id: string) => remote<Grade>(`/api/v1/catalog/grades/${id}`),
 
-  getSubject: (id: string) => request<Subject>(`/api/v1/catalog/subjects/${id}`),
+  getSubject: (id: string) => remote<Subject>(`/api/v1/catalog/subjects/${id}`),
 
   getCatalogItem: (type: CatalogEntityType, id: string) => {
     switch (type) {
@@ -112,65 +116,65 @@ export const api = {
   },
 
   createCountry: (body: { name: string; name_ar?: string; code?: string }) =>
-    request<Country>('/api/v1/catalog/countries', {
+    remote<Country>('/api/v1/catalog/countries', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
 
   createEducationSystem: (body: { country_id: string; name: string; name_ar?: string }) =>
-    request('/api/v1/catalog/education-systems', {
+    remote('/api/v1/catalog/education-systems', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
 
   createGrade: (body: { education_system_id: string; name: string; name_ar?: string; sort_order?: number }) =>
-    request('/api/v1/catalog/grades', {
+    remote('/api/v1/catalog/grades', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
 
   createSubject: (body: { grade_id: string; name: string; name_ar?: string }) =>
-    request('/api/v1/catalog/subjects', {
+    remote('/api/v1/catalog/subjects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
 
   updateCountry: (id: string, body: Record<string, unknown>) =>
-    request<Country>(`/api/v1/catalog/countries/${id}`, {
+    remote<Country>(`/api/v1/catalog/countries/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
 
   deleteCountry: (id: string) =>
-    request<void>(`/api/v1/catalog/countries/${id}`, { method: 'DELETE' }),
+    remote<void>(`/api/v1/catalog/countries/${id}`, { method: 'DELETE' }),
 
   updateEducationSystem: (id: string, body: Record<string, unknown>) =>
-    request(`/api/v1/catalog/education-systems/${id}`, {
+    remote(`/api/v1/catalog/education-systems/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
 
   deleteEducationSystem: (id: string) =>
-    request<void>(`/api/v1/catalog/education-systems/${id}`, { method: 'DELETE' }),
+    remote<void>(`/api/v1/catalog/education-systems/${id}`, { method: 'DELETE' }),
 
   updateGrade: (id: string, body: Record<string, unknown>) =>
-    request(`/api/v1/catalog/grades/${id}`, {
+    remote(`/api/v1/catalog/grades/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
 
   deleteGrade: (id: string) =>
-    request<void>(`/api/v1/catalog/grades/${id}`, { method: 'DELETE' }),
+    remote<void>(`/api/v1/catalog/grades/${id}`, { method: 'DELETE' }),
 
   updateSubject: (id: string, body: Record<string, unknown>) =>
-    request(`/api/v1/catalog/subjects/${id}`, {
+    remote(`/api/v1/catalog/subjects/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -193,28 +197,28 @@ export const api = {
   },
 
   createCountryFull: (body: Record<string, unknown>) =>
-    request<Country>('/api/v1/catalog/countries', {
+    remote<Country>('/api/v1/catalog/countries', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
 
   createEducationSystemFull: (body: Record<string, unknown>) =>
-    request('/api/v1/catalog/education-systems', {
+    remote('/api/v1/catalog/education-systems', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
 
   createGradeFull: (body: Record<string, unknown>) =>
-    request('/api/v1/catalog/grades', {
+    remote('/api/v1/catalog/grades', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
 
   createSubjectFull: (body: Record<string, unknown>) =>
-    request('/api/v1/catalog/subjects', {
+    remote('/api/v1/catalog/subjects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -223,36 +227,38 @@ export const api = {
   uploadCatalogHero: async (type: CatalogEntityType, id: string, file: File) => {
     const form = new FormData()
     form.append('file', file)
-    return request(`/api/v1/catalog/${type}/${id}/hero`, { method: 'POST', body: form })
+    return remote(`/api/v1/catalog/${type}/${id}/hero`, { method: 'POST', body: form })
   },
 
   deleteCatalogHero: (type: CatalogEntityType, id: string) =>
-    request(`/api/v1/catalog/${type}/${id}/hero`, { method: 'DELETE' }),
+    remote(`/api/v1/catalog/${type}/${id}/hero`, { method: 'DELETE' }),
 
   catalogHeroUrl: (type: CatalogEntityType, id: string, cacheBust?: number) => {
     const suffix = cacheBust ? `?t=${cacheBust}` : ''
-    return `${BASE}/api/v1/catalog/hero/${type}/${id}${suffix}`
+    return `${REMOTE_BASE}/api/v1/catalog/hero/${type}/${id}${suffix}`
   },
 
   deleteSubject: (id: string) =>
-    request<{ deleted: boolean; linked_books: number }>(`/api/v1/catalog/subjects/${id}`, {
+    remote<{ deleted: boolean; linked_books: number }>(`/api/v1/catalog/subjects/${id}`, {
       method: 'DELETE',
     }),
 
-  health: () => request<HealthResponse>('/health'),
+  health: () => remote<HealthResponse>('/health'),
+
+  extractorHealth: () => extractor<HealthResponse>('/health'),
 
   listBooks: (params?: { limit?: number; offset?: number; subject_id?: string }) => {
     const q = new URLSearchParams()
     q.set('limit', String(params?.limit ?? 100))
     q.set('offset', String(params?.offset ?? 0))
     if (params?.subject_id) q.set('subject_id', params.subject_id)
-    return request<{ items: Book[] }>(`/api/v1/books?${q}`)
+    return extractor<{ items: Book[] }>(`/api/v1/books?${q}`)
   },
 
-  getBook: (resourceId: string) => request<Book>(`/api/v1/books/${resourceId}`),
+  getBook: (resourceId: string) => extractor<Book>(`/api/v1/books/${resourceId}`),
 
   deleteBook: (resourceId: string) =>
-    request<{ deleted: boolean; deleted_jobs: number }>(`/api/v1/books/${resourceId}`, {
+    extractor<{ deleted: boolean; deleted_jobs: number }>(`/api/v1/books/${resourceId}`, {
       method: 'DELETE',
     }),
 
@@ -261,11 +267,11 @@ export const api = {
     form.append('file', file)
     form.append('subject_id', subjectId)
     form.append('metadata', JSON.stringify(metadata))
-    return request<Book>('/api/v1/books', { method: 'POST', body: form })
+    return extractor<Book>('/api/v1/books', { method: 'POST', body: form })
   },
 
   createJob: (resourceId: string, body: ExtractionJobRequest) =>
-    request<ExtractionJob>(`/api/v1/books/${resourceId}/extraction-jobs`, {
+    extractor<ExtractionJob>(`/api/v1/books/${resourceId}/extraction-jobs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -277,40 +283,40 @@ export const api = {
     if (params?.book_resource_id) q.set('book_resource_id', params.book_resource_id)
     q.set('limit', String(params?.limit ?? 100))
     q.set('offset', String(params?.offset ?? 0))
-    return request<{ items: ExtractionJob[] }>(`/api/v1/jobs?${q}`)
+    return extractor<{ items: ExtractionJob[] }>(`/api/v1/jobs?${q}`)
   },
 
-  getJob: (jobId: string) => request<ExtractionJob>(`/api/v1/jobs/${jobId}`),
+  getJob: (jobId: string) => extractor<ExtractionJob>(`/api/v1/jobs/${jobId}`),
 
   cancelJob: (jobId: string) =>
-    request<ExtractionJob>(`/api/v1/jobs/${jobId}/stop`, { method: 'POST' }),
+    extractor<ExtractionJob>(`/api/v1/jobs/${jobId}/stop`, { method: 'POST' }),
 
   stopJob: (jobId: string) =>
-    request<ExtractionJob>(`/api/v1/jobs/${jobId}/stop`, { method: 'POST' }),
+    extractor<ExtractionJob>(`/api/v1/jobs/${jobId}/stop`, { method: 'POST' }),
 
   resumeJob: (jobId: string) =>
-    request<ExtractionJob>(`/api/v1/jobs/${jobId}/resume`, { method: 'POST' }),
+    extractor<ExtractionJob>(`/api/v1/jobs/${jobId}/resume`, { method: 'POST' }),
 
   retryJob: (jobId: string) =>
-    request<ExtractionJob>(`/api/v1/jobs/${jobId}/resume`, { method: 'POST' }),
+    extractor<ExtractionJob>(`/api/v1/jobs/${jobId}/resume`, { method: 'POST' }),
 
   deleteJob: (jobId: string) =>
-    request<{ deleted: boolean; job_id: string }>(`/api/v1/jobs/${jobId}`, { method: 'DELETE' }),
+    extractor<{ deleted: boolean; job_id: string }>(`/api/v1/jobs/${jobId}`, { method: 'DELETE' }),
 
   listEvents: (jobId: string, afterId = 0, limit = 500) =>
-    request<{ items: JobEvent[] }>(`/api/v1/jobs/${jobId}/events?after_id=${afterId}&limit=${limit}`),
+    extractor<{ items: JobEvent[] }>(`/api/v1/jobs/${jobId}/events?after_id=${afterId}&limit=${limit}`),
 
   qualityReport: (jobId: string) =>
-    request<Record<string, unknown>>(`/api/v1/jobs/${jobId}/quality-report`),
+    extractor<Record<string, unknown>>(`/api/v1/jobs/${jobId}/quality-report`),
 
   manifest: (jobId: string) =>
-    request<Record<string, unknown>>(`/api/v1/jobs/${jobId}/manifest`),
+    extractor<Record<string, unknown>>(`/api/v1/jobs/${jobId}/manifest`),
 
   errors: (jobId: string) =>
-    request<{ items: Record<string, unknown>[] }>(`/api/v1/jobs/${jobId}/errors`),
+    extractor<{ items: Record<string, unknown>[] }>(`/api/v1/jobs/${jobId}/errors`),
 
   search: (body: SearchRequest) =>
-    request<{ items: SearchHit[] }>('/api/v1/search', {
+    remote<{ items: SearchHit[] }>('/api/v1/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -343,7 +349,7 @@ export function subscribeJobEvents(
   afterId = 0,
 ): () => void {
   const tokenPart = authToken ? `&token=${encodeURIComponent(authToken)}` : ''
-  const url = `${BASE}/api/v1/jobs/${jobId}/events/stream?after_id=${afterId}${tokenPart}`
+  const url = `${EXTRACTOR_BASE}/api/v1/jobs/${jobId}/events/stream?after_id=${afterId}${tokenPart}`
   const source = new EventSource(url)
 
   const handle = (e: MessageEvent) => {

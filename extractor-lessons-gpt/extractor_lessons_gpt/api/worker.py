@@ -4,16 +4,16 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from remote_lessons_gpt.config import settings
 from remote_lessons_gpt.schemas import BookMetadata
 
 from extractor_lessons_gpt.api.job_service import JobCancelled, run_extraction_job
-from extractor_lessons_gpt.api.job_store import ExtendedJobStore
+from extractor_lessons_gpt.api.local_job_store import LocalFileJobStore
 from extractor_lessons_gpt.api.remote_client import RemoteApiError, RemoteIngestClient, remote_api_configured
+from extractor_lessons_gpt.config import settings
 
 
 class ExtractionWorkerPool:
-    def __init__(self, store: ExtendedJobStore, worker_count: int | None = None):
+    def __init__(self, store: LocalFileJobStore, worker_count: int | None = None):
         self.store = store
         self.worker_count = max(1, worker_count or settings.api_worker_count)
         self.stop_event = __import__("threading").Event()
@@ -52,36 +52,25 @@ class ExtractionWorkerPool:
 
         remote_client: RemoteIngestClient | None = None
         remote_job_id = str(job.get("remote_job_id") or job_id)
-        sync_to_remote = bool(job.get("sync_to_remote"))
         remote_synced = 0
 
         try:
             metadata = BookMetadata.model_validate(dict(book.get("metadata") or {}))
             metadata_data = metadata.model_dump()
             metadata_data.update(job.get("metadata_overrides") or {})
-            if book.get("subject_id"):
-                path = self.store.get_subject_path(book["subject_id"])
-                if path:
-                    metadata_data.update(
-                        {
-                            "country": path.get("country_name"),
-                            "education_system": path.get("education_system_name"),
-                            "grade": path.get("grade_name"),
-                            "subject": path.get("subject_name"),
-                        }
-                    )
             metadata = BookMetadata.model_validate(metadata_data)
 
             backend = str(job.get("extractor_backend") or "local")
             language_hint = str((job.get("metadata_overrides") or {}).get("language_hint") or "Arabic mathematics textbook content")
             output_dir = Path(job["output_dir"])
 
-            if sync_to_remote and remote_api_configured():
-                token = str(job.get("remote_auth_token") or "").strip()
-                if not token:
-                    raise RuntimeError("Remote sync is enabled but no remote auth token was stored on the job")
-                remote_client = RemoteIngestClient(token)
-                self.store.update_remote_sync(job_id, status="running", message="Publishing pages to remote server")
+            if not remote_api_configured():
+                raise RuntimeError("REMOTE_API_URL is required for extraction jobs")
+            token = str(job.get("remote_auth_token") or "").strip()
+            if not token:
+                raise RuntimeError("Remote auth token was not stored on the job")
+            remote_client = RemoteIngestClient(token)
+            self.store.update_remote_sync(job_id, status="running", message="Publishing pages to remote server")
 
             last_event_progress = -1.0
             last_event_page = None
@@ -116,11 +105,9 @@ class ExtractionWorkerPool:
 
             def on_page_remote(page_number: int, page_data: dict[str, Any], page_docs: list[dict[str, Any]], info: dict[str, Any]) -> None:
                 nonlocal remote_synced
-                if not remote_client:
-                    return
                 printed = page_data.get("printed_page_number")
                 printed_text = str(printed) if printed is not None else None
-                response = remote_client.ingest_page(
+                response = remote_client.ingest_page(  # type: ignore[union-attr]
                     remote_job_id,
                     book_id=book_id,
                     book_resource_id=str(book["resource_id"]),
@@ -148,39 +135,34 @@ class ExtractionWorkerPool:
                 start_page=int(job["start_page"]),
                 end_page=job.get("end_page"),
                 resume=bool(job["resume"]),
-                index_to_opensearch=bool(job["index_to_opensearch"]),
-                sync_to_remote=sync_to_remote,
                 book_metadata=metadata,
                 language_hint=language_hint,
                 progress_callback=progress,
                 cancel_check=lambda: self.store.is_cancel_requested(job_id),
-                on_page_remote=on_page_remote if remote_client else None,
+                on_page_remote=on_page_remote,
                 book_resource_id=str(book["resource_id"]),
             )
 
-            if remote_client:
-                remote_client.complete_job(
-                    remote_job_id,
-                    book_id=str(result.get("book_id") or book_id),
-                    extracted_records=int(result.get("extracted_records") or 0),
-                    indexed_records=int(result.get("remote_synced_records") or remote_synced),
-                    result=result,
-                )
-                self.store.update_remote_sync(
-                    job_id,
-                    status="completed",
-                    synced_records=int(result.get("remote_synced_records") or remote_synced),
-                    message="Remote PostgreSQL and OpenSearch sync completed",
-                )
+            remote_client.complete_job(
+                remote_job_id,
+                book_id=str(result.get("book_id") or book_id),
+                extracted_records=int(result.get("extracted_records") or 0),
+                indexed_records=int(result.get("remote_synced_records") or remote_synced),
+                result=result,
+            )
+            self.store.update_remote_sync(
+                job_id,
+                status="completed",
+                synced_records=int(result.get("remote_synced_records") or remote_synced),
+                message="Remote PostgreSQL and OpenSearch sync completed",
+            )
 
             self.store.complete_job(job_id, result=result)
         except JobCancelled as exc:
             self.store.mark_paused(job_id, str(exc) or "Job paused")
         except RemoteApiError as exc:
-            if sync_to_remote:
-                self.store.update_remote_sync(job_id, status="failed", message=str(exc))
+            self.store.update_remote_sync(job_id, status="failed", message=str(exc))
             self.store.fail_job(job_id, str(exc).strip() or repr(exc), traceback.format_exc())
         except Exception as exc:
-            if sync_to_remote:
-                self.store.update_remote_sync(job_id, status="failed", message=str(exc))
+            self.store.update_remote_sync(job_id, status="failed", message=str(exc))
             self.store.fail_job(job_id, str(exc).strip() or repr(exc), traceback.format_exc())
