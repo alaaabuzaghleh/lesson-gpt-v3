@@ -16,12 +16,12 @@ ENV/
 !.env.example
 
 # Runtime data (uploads, job DB, extraction artifacts)
-ai_book_ingestor_v4/data/
-ai_book_ingestor_v4/output/
-ai_book_ingestor_v4/books/
-pdf_codex_extractor/data/
-pdf_codex_extractor/output/
-pdf_codex_extractor/books/
+remote-lessons-gpt/data/
+remote-lessons-gpt/output/
+remote-lessons-gpt/books/
+extractor-lessons-gpt/data/
+extractor-lessons-gpt/output/
+extractor-lessons-gpt/books/
 output/
 books/
 
@@ -52,7 +52,7 @@ Thumbs.db
 *.log
 
 # Node / React admin dashboard
-lessonsGPTAdmin/node_modules/
-lessonsGPTAdmin/dist/
-lessonsGPTAdmin/.env
-lessonsGPTAdmin/.env.local
+admin-lessons-gpt/node_modules/
+admin-lessons-gpt/dist/
+admin-lessons-gpt/.env
+admin-lessons-gpt/.env.local
