@@ -172,6 +172,7 @@ def _search_service():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    store.initialize()
     workers.start()
     yield
     workers.stop()
